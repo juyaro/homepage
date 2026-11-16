@@ -5145,7 +5145,15 @@ async function openVideo(){
     if(pl){ pl.innerHTML=''; pl.appendChild(v); }
     v.load();
     setBar(100);
-    setMsg('영상 잠금 해제 완료! 아래 재생 버튼을 누르면 재생됩니다.');
+    setMsg('영상 잠금 해제 완료. 재생을 시작합니다.');
+    var started=false;
+    try{ await v.play(); started=true; }catch(e){}
+    if(!started){
+      // 브라우저가 소리 있는 자동 재생을 막으면 음소거로 먼저 재생하고, 소리 켜기는 영상 컨트롤에서 누르도록 안내합니다.
+      v.muted=true;
+      try{ await v.play(); setMsg('재생 중입니다. 소리를 켜려면 영상의 스피커 아이콘을 누르세요.'); }
+      catch(e){ setMsg('영상 잠금 해제 완료! 재생 버튼을 누르면 재생됩니다.'); }
+    }
   }catch(e){
     console.error(e);
     setBar(0);
@@ -5402,7 +5410,15 @@ async function openVideo(){
     if(pl){ pl.innerHTML=''; pl.appendChild(v); }
     v.load();
     setBar(100);
-    setMsg('영상 잠금 해제 완료! 아래 재생 버튼을 누르면 재생됩니다.');
+    setMsg('영상 잠금 해제 완료. 재생을 시작합니다.');
+    var started=false;
+    try{ await v.play(); started=true; }catch(e){}
+    if(!started){
+      // 브라우저가 소리 있는 자동 재생을 막으면 음소거로 먼저 재생하고, 소리 켜기는 영상 컨트롤에서 누르도록 안내합니다.
+      v.muted=true;
+      try{ await v.play(); setMsg('재생 중입니다. 소리를 켜려면 영상의 스피커 아이콘을 누르세요.'); }
+      catch(e){ setMsg('영상 잠금 해제 완료! 재생 버튼을 누르면 재생됩니다.'); }
+    }
   }catch(e){
     console.error(e);
     setBar(0);
