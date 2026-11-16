@@ -4338,6 +4338,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
           const p = (elapsed + (t-seg.start))/totalDur;
           const remain = p > 0.02 ? ((performance.now()-started)/1000) * (1-p)/p : null;
           setExportProgress(p*100, `렌더링 중 · ${fmt(elapsed + (t-seg.start))} / ${fmt(totalDur)}${remain != null ? ` · 약 ${Math.ceil(remain)}초 남음` : ''}`);
+          updateTimeUI();
         });
         elapsed += (seg.end - seg.start);
       }
@@ -4425,6 +4426,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         await playSegment(seg, (t) => {
           const percent = Math.min(100, Math.round(((elapsed + (t-seg.start))/totalDur) * 100));
           if(onProgress) onProgress(`휴대폰용 MP4 직접 렌더링 ${percent}%`, 20 + Math.round(percent * 0.55));
+          updateTimeUI();
         });
         elapsed += (seg.end - seg.start);
       }
