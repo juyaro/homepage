@@ -4447,6 +4447,26 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     }
   }
 
+  // 브라우저 MP4 녹화 결과는 길이 정보가 비어 있어 플레이어에서 플레이바가 움직이지 않습니다.
+  // 화질은 그대로 두고(재인코딩 없이) 파일 구조만 고쳐서 길이와 탐색 정보를 채웁니다.
+  async function fixMp4Structure(blob){
+    try{
+      const libs = await loadFFmpegLibs();
+      const ff = await ensureFFmpegLoaded();
+      const stamp = Date.now();
+      const inName = `fix_${stamp}.mp4`;
+      const outName = `fixed_${stamp}.mp4`;
+      await ff.writeFile(inName, await libs.fetchFile(blob));
+      await ff.exec(['-i', inName, '-c', 'copy', '-movflags', '+faststart', outName]);
+      const data = await ff.readFile(outName);
+      try{ await ff.deleteFile(inName); await ff.deleteFile(outName); }catch(e){}
+      return new Blob([data.buffer], {type:'video/mp4'});
+    }catch(err){
+      console.warn('MP4 구조 정리에 실패해 원본을 사용합니다.', err);
+      return blob;
+    }
+  }
+
   async function saveLastExportAsMp4(){
     const blob = window.__lastExportBlob;
     if(!blob) return;
@@ -4463,6 +4483,8 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         try{
           status.textContent = 'MP4 직접 렌더링 중... 영상 길이만큼 시간이 걸립니다.';
           mp4Blob = await renderSegmentsWithRecorder(directMime, (line) => { status.textContent = line; }, { fps: 24, videoBitsPerSecond: 2500000 });
+          status.textContent = 'MP4 파일 정리 중...';
+          mp4Blob = await fixMp4Structure(mp4Blob);
         }catch(err){
           console.warn('direct mp4 render failed, fallback to ffmpeg', err);
           mp4Blob = null;
@@ -5509,6 +5531,8 @@ if(document.readyState==='loading'){
         addProgress('하드웨어 가속 초고속 H.264 MP4 직접 렌더링을 시작합니다.', 15);
         try{
           mobileVideoBlob = await renderSegmentsWithRecorder(directMime, addProgress, { fps: 24, videoBitsPerSecond: 2500000 });
+          addProgress('MP4 파일 구조를 정리하는 중입니다.', 74);
+          mobileVideoBlob = await fixMp4Structure(mobileVideoBlob);
           window.__lastMobileMp4Blob = mobileVideoBlob;
           mimeType = 'video/mp4';
           addProgress('H.264 MP4 초고속 렌더링 완료!', 76);
