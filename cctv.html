@@ -4457,7 +4457,20 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     setToolbarStatus('MP4 변환 중', 'busy');
     try{
       const outName = `edited_${Date.now()}.mp4`;
-      const mp4Blob = await transcodeBlobToMobileMp4(blob, outName, (line) => { status.textContent = line; });
+      let mp4Blob = null;
+      const directMime = getSupportedMp4RecorderMime();
+      if(directMime){
+        try{
+          status.textContent = 'MP4 직접 렌더링 중... 영상 길이만큼 시간이 걸립니다.';
+          mp4Blob = await renderSegmentsWithRecorder(directMime, (line) => { status.textContent = line; }, { fps: 24, videoBitsPerSecond: 2500000 });
+        }catch(err){
+          console.warn('direct mp4 render failed, fallback to ffmpeg', err);
+          mp4Blob = null;
+        }
+      }
+      if(!mp4Blob){
+        mp4Blob = await transcodeBlobToMobileMp4(blob, outName, (line) => { status.textContent = line; });
+      }
       const url = URL.createObjectURL(mp4Blob);
       const a = document.createElement('a');
       a.href = url; a.download = outName;
@@ -5506,13 +5519,9 @@ if(document.readyState==='loading'){
     }
 
     if(!mobileVideoBlob){
-      addProgress('H.264 변환 엔진 접속 중 (10초 대기)...', 15);
+      addProgress('H.264 변환 엔진을 준비하는 중입니다...', 15);
       try{
-        mobileVideoBlob = await withTimeout(
-          transcodeBlobToMobileMp4(blob, `${name}_mobile.mp4`, addProgress),
-          10000,
-          '변환 엔진 접속 시간이 초과되었습니다. 초고속 비상 모드로 진행합니다.'
-        );
+        mobileVideoBlob = await transcodeBlobToMobileMp4(blob, `${name}_mobile.mp4`, addProgress);
         mimeType = 'video/mp4';
       } catch(err){
         console.error('H.264 MP4 conversion failed', err);
