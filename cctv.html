@@ -1530,7 +1530,13 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
           if(!isNaN(ms)) return ms;
         }
       }
-    }catch(err){ /* 헤더를 읽지 못하면 파일 이름으로 넘어갑니다 */ }
+      // 헤더에 없으면 영상 데이터 안의 시각 텍스트(예: 2026-10-24 23:48:32, 1초 간격으로 기록됨)의 첫 값을 씁니다.
+      const st = text.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/);
+      if(st){
+        const ms = new Date(+st[1], +st[2]-1, +st[3], +st[4], +st[5], +st[6]).getTime();
+        if(!isNaN(ms)) return ms;
+      }
+    }catch(err){ /* 읽지 못하면 파일 이름으로 넘어갑니다 */ }
     return filenameRecordedTime(file.name);
   }
 
@@ -5711,6 +5717,43 @@ if(document.readyState==='loading'){
   function mp4BoxType(dv, off){
     return String.fromCharCode(dv.getUint8(off+4), dv.getUint8(off+5), dv.getUint8(off+6), dv.getUint8(off+7));
   }
+  const TS_MIN_MS = Date.UTC(2000, 0, 1);
+  // MP4 상자(box) 목록을 읽습니다. 상자 안의 상자를 찾을 때 사용합니다.
+  function mp4Boxes(dv, start, end){
+    const out = [];
+    let p = start;
+    while(p + 8 <= end){
+      let size = dv.getUint32(p);
+      let hdr = 8;
+      if(size === 1){ size = Number(dv.getBigUint64(p+8)); hdr = 16; }
+      else if(size === 0){ size = end - p; }
+      if(size < hdr || p + size > end) break;
+      out.push({ type: mp4BoxType(dv, p), body: p + hdr, end: p + size });
+      p += size;
+    }
+    return out;
+  }
+  // mvhd/mdhd: 버전(1) + 플래그(3) 뒤에 생성 시각이 옵니다. 1904-01-01 UTC 기준 초 단위입니다.
+  function mp4CreationMs(dv, body){
+    const ver = dv.getUint8(body);
+    const secs = ver === 1 ? Number(dv.getBigUint64(body+4)) : dv.getUint32(body+4);
+    return secs ? (secs - 2082844800) * 1000 : 0;
+  }
+  function mp4CreationFromMoov(dv){
+    const moovBoxes = mp4Boxes(dv, 0, dv.byteLength);
+    const cands = [];
+    const mvhd = moovBoxes.find(b => b.type === 'mvhd');
+    if(mvhd) cands.push(mp4CreationMs(dv, mvhd.body));
+    for(const trak of moovBoxes.filter(b => b.type === 'trak')){
+      const mdia = mp4Boxes(dv, trak.body, trak.end).find(b => b.type === 'mdia');
+      if(!mdia) continue;
+      const mdhd = mp4Boxes(dv, mdia.body, mdia.end).find(b => b.type === 'mdhd');
+      if(mdhd) cands.push(mp4CreationMs(dv, mdhd.body));
+    }
+    const ok = cands.find(v => v >= TS_MIN_MS && v <= Date.now() + 86400000);
+    return ok ?? null;
+  }
+  // 파일 앞부분의 상자 머리만 읽어 moov 상자를 찾습니다(moov가 파일 뒤쪽에 있어도 동작).
   async function readMp4CreationTime(file){
     try{
       const size = file.size;
@@ -5723,42 +5766,13 @@ if(document.readyState==='loading'){
         else if(boxSize === 0){ boxSize = size - off; }
         if(boxSize < hdr) return null;
         if(mp4BoxType(head, 0) === 'moov'){
-          const moov = new DataView(await file.slice(off+hdr, off+boxSize).arrayBuffer());
-          let p = 0;
-          while(p + 8 <= moov.byteLength){
-            const s = moov.getUint32(p);
-            if(mp4BoxType(moov, p) === 'mvhd'){
-              const ver = moov.getUint8(p+8);
-              const secs = ver === 1 ? Number(moov.getBigUint64(p+12)) : moov.getUint32(p+12);
-              if(!secs) return null;
-              const ms = (secs - 2082844800) * 1000;
-              const y = new Date(ms).getFullYear();
-              return (y >= 2000 && ms <= Date.now() + 366*86400000) ? ms : null;
-            }
-            if(s < 8) break;
-            p += s;
-          }
-          return null;
+          const dv = new DataView(await file.slice(off+hdr, off+boxSize).arrayBuffer());
+          return mp4CreationFromMoov(dv);
         }
         off += boxSize;
       }
-    }catch(err){ console.warn('MP4 촬영일시를 읽지 못했습니다.', err); }
+    }catch(err){ console.warn('영상의 촬영일시 정보를 읽지 못했습니다.', err); }
     return null;
-  }
-
-  function tsFormatInput(ms){
-    const d = new Date(ms); const p = n => String(n).padStart(2,'0');
-    return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-  }
-  function setTsNote(text, cls){
-    tsNote.textContent = text;
-    tsNote.className = 'field-note' + (cls ? ' ' + cls : '');
-  }
-  function waitForVideoMeta(){
-    return new Promise((resolve) => {
-      if(srcVideo.readyState >= 1) return resolve();
-      srcVideo.addEventListener('loadedmetadata', () => resolve(), { once:true });
-    });
   }
 
   async function resolveTimestampBase(blob, meta){
@@ -5788,7 +5802,7 @@ if(document.readyState==='loading'){
     const fs = Math.max(12, Math.round(stage.height * 0.054));
     const cy = stage.height * 0.938;
     ctx.save();
-    ctx.font = `600 ${fs}px ${TS_MONO}`;
+    ctx.font = `400 ${fs}px ${TS_MONO}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#ffffff';
