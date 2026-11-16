@@ -5801,9 +5801,9 @@ if(document.readyState==='loading'){
     const text = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}   ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     const cy = stage.height * 0.938;
     ctx.save();
-    // 글자 폭이 화면 가로의 약 40%가 되도록 글자 크기를 맞춥니다(스샷의 원래 영상 시각과 같은 비율).
+    // 글자 폭이 프레임(캔버스) 가로의 약 20%가 되도록 글자 크기를 맞춥니다(스샷2의 비율).
     ctx.font = `400 100px ${TS_MONO}`;
-    const fs = Math.max(10, Math.round(100 * stage.width * 0.40 / ctx.measureText(text).width));
+    const fs = Math.max(10, Math.round(100 * stage.width * 0.20 / ctx.measureText(text).width));
     ctx.font = `400 ${fs}px ${TS_MONO}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
