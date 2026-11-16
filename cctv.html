@@ -210,7 +210,8 @@
   .input:focus{outline:none; border-color:var(--blue); box-shadow:0 0 0 4px var(--blue-ring); background:var(--surface);}
   .input.invalid{border-color:var(--red); box-shadow:0 0 0 4px rgba(255,59,48,.18);}
   .input[type=number]{width:84px; padding-right:6px;}
-  .input[type=date], .input[type=time]{padding:0 10px;}
+  .input[type=date], .input[type=time], .input[type=datetime-local]{padding:0 10px;}
+  html[data-theme="dark"] .input[type=datetime-local]::-webkit-calendar-picker-indicator{filter:invert(1);}
   html[data-theme="dark"] .input[type=date]::-webkit-calendar-picker-indicator,
   html[data-theme="dark"] .input[type=time]::-webkit-calendar-picker-indicator{filter:invert(1);}
   .field{display:flex; flex-direction:column; gap:5px; flex:1; min-width:120px;}
@@ -910,6 +911,23 @@
       </div>
     </div>
 
+    <!-- 2-2. 화면 날짜·시간 표시 -->
+    <div class="card">
+      <div class="card-head tight">
+        <div class="card-title"><div><h2>화면 날짜·시간 표시</h2><p class="card-sub">영상 하단 가운데에 날짜와 시간(시·분·초)을 넣습니다. 렌더링한 영상에도 그대로 들어갑니다.</p></div></div>
+      </div>
+      <label class="switch-row between">
+        <span class="label"><strong>날짜·시간 표시</strong><span>끄면 렌더링 영상에 아무것도 넣지 않습니다.</span></span>
+        <span class="switch"><input type="checkbox" id="tsEnable" checked><span class="knob"></span></span>
+      </label>
+      <div class="divider"></div>
+      <div class="field">
+        <label for="tsStart">촬영 시작 날짜·시간</label>
+        <input type="datetime-local" step="1" id="tsStart" class="input">
+        <span class="field-note" id="tsNote">영상을 불러오면 자동으로 채워집니다.</span>
+      </div>
+    </div>
+
     <!-- 3. 렌더링 -->
     <div class="card">
       <div class="card-head tight">
@@ -1490,6 +1508,32 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     return ff;
   }
 
+  // 파일 이름에 들어 있는 날짜·시간(예: CH01_20260723114510.avi)을 읽습니다.
+  function filenameRecordedTime(name){
+    const m = String(name).match(/(?<!\d)(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})[-_ T]?(\d{2})[-_.:]?(\d{2})(?:[-_.:]?(\d{2}))?(?!\d)/);
+    if(!m) return null;
+    const [y, mo, d, h, mi, se] = [m[1], m[2], m[3], m[4], m[5], m[6] || 0].map(Number);
+    if(mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 59) return null;
+    const ms = new Date(y, mo - 1, d, h, mi, se).getTime();
+    return isNaN(ms) ? null : ms;
+  }
+  // AVI 헤더의 기록 날짜(IDIT/ICRD)를 먼저 보고, 없으면 파일 이름에서 읽습니다.
+  async function readAviRecordedTime(file){
+    try{
+      const buf = new Uint8Array(await file.slice(0, Math.min(file.size, 4*1024*1024)).arrayBuffer());
+      const text = new TextDecoder().decode(buf);
+      const m = text.match(/(?:IDIT|ICRD)[\s\S]{4}([^\x00]{8,40})/);
+      if(m){
+        const dm = m[1].match(/(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+        if(dm){
+          const ms = new Date(+dm[1], +dm[2]-1, +dm[3], +(dm[4]||0), +(dm[5]||0), +(dm[6]||0)).getTime();
+          if(!isNaN(ms)) return ms;
+        }
+      }
+    }catch(err){ /* 헤더를 읽지 못하면 파일 이름으로 넘어갑니다 */ }
+    return filenameRecordedTime(file.name);
+  }
+
   convertBtn.addEventListener('click', async () => {
     if(!aviFile) return;
     if(location.protocol === 'file:'){
@@ -1515,7 +1559,12 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       const inName = 'input' + (aviFile.name.match(/\.[a-zA-Z0-9]+$/) || ['.avi'])[0];
       await ff.writeFile(inName, await libs.fetchFile(aviFile));
       await ff.exec(['-i', inName, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', 'output.mp4']);
-      const data = await ff.readFile('output.mp4');
+      // MP4의 촬영일시가 변환 시각(지금)으로 찍히지 않도록, 원본의 기록 시각으로 바꿉니다.
+      // 기록 시각을 찾지 못하면 1970년으로 두어 날짜·시간이 표시되지 않게 합니다.
+      const recordedMs = await readAviRecordedTime(aviFile);
+      const creationIso = recordedMs ? new Date(recordedMs).toISOString() : '1970-01-01T00:00:00Z';
+      await ff.exec(['-i', 'output.mp4', '-c', 'copy', '-metadata', `creation_time=${creationIso}`, '-movflags', '+faststart', 'output2.mp4']);
+      const data = await ff.readFile('output2.mp4');
       const blob = new Blob([data.buffer], {type:'video/mp4'});
       const url = URL.createObjectURL(blob);
       const outName = (aviFile.name.replace(/\.[^.]+$/, '') || 'converted') + '.mp4';
@@ -1528,7 +1577,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       $('aviResult').innerHTML = `<div class="notice ok">${ico('check-circle')}<div>변환 완료. <strong>${escapeHtml(outName)}</strong> 이름으로 PC에 저장되었습니다.</div></div>
         <div class="row" style="margin-top:8px;"><a class="dl" href="${url}" download="${escapeHtml(outName)}">${ico('download')} 다시 다운로드</a> <button type="button" id="loadConvertedBtn" class="btn btn-sm btn-primary">편집기로 바로 불러오기</button></div>`;
       $('loadConvertedBtn').addEventListener('click', () => {
-        loadVideoBlob(blob, {name:outName, size:blob.size, lastModified:Date.now(), type:'video/mp4'});
+        loadVideoBlob(blob, {name:outName, size:blob.size, lastModified:0, type:'video/mp4'});
       });
       toast('AVI → MP4 변환이 완료되었습니다.', {type:'success'});
     } catch(err){
@@ -2019,6 +2068,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     resetMotion();
     $('videoFileName').innerHTML = `<strong>${escapeHtml(meta.name || '영상')}</strong> · ${fmtBytes(meta.size)}`;
     setToolbarStatus('영상 읽는 중', 'busy');
+    resolveTimestampBase(blob, meta);
   }
 
   // 드래그 앤 드롭
@@ -2764,6 +2814,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       if(r.reveal) revealOriginal(rect, r.shape);
       else applyGlassMosaic(rect, r.shape);
     });
+    drawTimestampOverlay(t);
     // 편집 화면에서만 테두리/번호/손잡이를 그립니다. 실제 렌더링에는 들어가지 않습니다.
     if(editing){
       drawAutoOutlines(autoRects);
@@ -5646,6 +5697,117 @@ if(document.readyState==='loading'){
   // =====================================================================
   // 초기화
   // =====================================================================
+  // =====================================================================
+  // 화면 날짜·시간 표시
+  // =====================================================================
+  const tsEnable = $('tsEnable');
+  const tsStart = $('tsStart');
+  const tsNote = $('tsNote');
+  let tsBase = null;   // 영상 0초에 해당하는 시각 (epoch ms, 로컬 시간 기준)
+  let tsToken = 0;     // 영상이 바뀔 때마다 증가 — 늦게 끝난 이전 읽기 결과를 무시하기 위함
+  const TS_MONO = "Consolas, 'SF Mono', Menlo, monospace";
+
+  // MP4의 mvhd 상자에서 촬영(생성) 시각을 읽습니다. 1904-01-01 UTC 기준 초 단위 값입니다.
+  function mp4BoxType(dv, off){
+    return String.fromCharCode(dv.getUint8(off+4), dv.getUint8(off+5), dv.getUint8(off+6), dv.getUint8(off+7));
+  }
+  async function readMp4CreationTime(file){
+    try{
+      const size = file.size;
+      let off = 0;
+      while(off + 8 <= size){
+        const head = new DataView(await file.slice(off, Math.min(size, off+16)).arrayBuffer());
+        let boxSize = head.getUint32(0);
+        let hdr = 8;
+        if(boxSize === 1){ boxSize = Number(head.getBigUint64(8)); hdr = 16; }
+        else if(boxSize === 0){ boxSize = size - off; }
+        if(boxSize < hdr) return null;
+        if(mp4BoxType(head, 0) === 'moov'){
+          const moov = new DataView(await file.slice(off+hdr, off+boxSize).arrayBuffer());
+          let p = 0;
+          while(p + 8 <= moov.byteLength){
+            const s = moov.getUint32(p);
+            if(mp4BoxType(moov, p) === 'mvhd'){
+              const ver = moov.getUint8(p+8);
+              const secs = ver === 1 ? Number(moov.getBigUint64(p+12)) : moov.getUint32(p+12);
+              if(!secs) return null;
+              const ms = (secs - 2082844800) * 1000;
+              const y = new Date(ms).getFullYear();
+              return (y >= 2000 && ms <= Date.now() + 366*86400000) ? ms : null;
+            }
+            if(s < 8) break;
+            p += s;
+          }
+          return null;
+        }
+        off += boxSize;
+      }
+    }catch(err){ console.warn('MP4 촬영일시를 읽지 못했습니다.', err); }
+    return null;
+  }
+
+  function tsFormatInput(ms){
+    const d = new Date(ms); const p = n => String(n).padStart(2,'0');
+    return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  function setTsNote(text, cls){
+    tsNote.textContent = text;
+    tsNote.className = 'field-note' + (cls ? ' ' + cls : '');
+  }
+  function waitForVideoMeta(){
+    return new Promise((resolve) => {
+      if(srcVideo.readyState >= 1) return resolve();
+      srcVideo.addEventListener('loadedmetadata', () => resolve(), { once:true });
+    });
+  }
+
+  async function resolveTimestampBase(blob, meta){
+    const token = ++tsToken;
+    tsBase = null;
+    const mp4Ms = await readMp4CreationTime(blob);
+    if(token !== tsToken) return;
+    const ms = mp4Ms ?? (meta && meta.name ? filenameRecordedTime(meta.name) : null);
+    tsBase = ms;
+    if(ms != null){
+      tsStart.value = tsFormatInput(ms);
+      setTsNote('영상에서 촬영 시각을 자동으로 채웠습니다. 다르면 직접 고쳐 주세요.', 'ok');
+    }else{
+      tsStart.value = '';
+      setTsNote('영상에서 촬영 시각을 찾지 못했습니다. 직접 입력해 주세요.', 'err');
+    }
+    drawFrame(undefined, {editing:true});
+  }
+
+  // 현재 원본 시각(t초)에 해당하는 날짜·시간을 화면 하단 가운데에 그립니다.
+  // 편집 화면과 렌더링 모두 drawFrame을 거치므로 렌더링 영상에도 같은 표시가 들어갑니다.
+  function drawTimestampOverlay(t){
+    if(!tsEnable.checked || tsBase == null) return;
+    const d = new Date(Math.floor((tsBase + t*1000) / 1000) * 1000);
+    const p = n => String(n).padStart(2,'0');
+    const text = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}   ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    const fs = Math.max(12, Math.round(stage.height * 0.054));
+    const cy = stage.height * 0.938;
+    ctx.save();
+    ctx.font = `600 ${fs}px ${TS_MONO}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff';
+    // 배경 상자 없이 글자만 그립니다. 밝은 영상에서도 읽히도록 약한 그림자만 줍니다.
+    ctx.shadowColor = 'rgba(0,0,0,0.55)';
+    ctx.shadowBlur = fs * 0.2;
+    ctx.fillText(text, stage.width / 2, cy);
+    ctx.restore();
+  }
+
+  tsEnable.addEventListener('change', () => drawFrame(undefined, {editing:true}));
+  tsStart.addEventListener('change', () => {
+    const v = tsStart.value ? Date.parse(tsStart.value) : NaN;
+    if(isNaN(v)){ setTsNote('날짜와 시간을 입력해 주세요.', 'err'); return; }
+    tsBase = v;
+    setTsNote('직접 입력한 시각으로 표시합니다.', 'ok');
+    drawFrame(undefined, {editing:true});
+  });
+
   blockPageInspection();
   syncAllSliders();
   setPlaying(false);
