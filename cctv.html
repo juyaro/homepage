@@ -212,6 +212,10 @@
   .input[type=number]{width:84px; padding-right:6px;}
   .input[type=date], .input[type=time], .input[type=datetime-local]{padding:0 10px;}
   html[data-theme="dark"] .input[type=datetime-local]::-webkit-calendar-picker-indicator{filter:invert(1);}
+  .ts-pos-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;}
+  .ts-pos{display:flex;gap:6px;}
+  .ts-pos button{padding:6px 10px;border-radius:8px;border:1px solid rgba(128,128,128,0.35);background:transparent;color:inherit;font-size:13px;cursor:pointer;}
+  .ts-pos button.active{background:#3b82f6;border-color:#3b82f6;color:#fff;}
   html[data-theme="dark"] .input[type=date]::-webkit-calendar-picker-indicator,
   html[data-theme="dark"] .input[type=time]::-webkit-calendar-picker-indicator{filter:invert(1);}
   .field{display:flex; flex-direction:column; gap:5px; flex:1; min-width:120px;}
@@ -911,15 +915,23 @@
       </div>
     </div>
 
-    <!-- 2-2. 화면 날짜·시간 표시 -->
+    <!-- 2-2. 날짜·시간 표시 -->
     <div class="card">
-      <div class="card-head tight">
-        <div class="card-title"><div><h2>화면 날짜·시간 표시</h2><p class="card-sub">영상 하단 가운데에 날짜와 시간(시·분·초)을 넣습니다. 렌더링한 영상에도 그대로 들어갑니다.</p></div></div>
+      <div class="card-head tight" style="display:flex;align-items:center;justify-content:space-between;">
+        <div class="card-title"><div><h2>날짜·시간 표시</h2></div></div>
+        <label class="switch-row" style="margin:0;">
+          <span class="switch"><input type="checkbox" id="tsEnable" checked><span class="knob"></span></span>
+        </label>
       </div>
-      <label class="switch-row between">
-        <span class="label"><strong>날짜·시간 표시</strong><span>끄면 렌더링 영상에 아무것도 넣지 않습니다.</span></span>
-        <span class="switch"><input type="checkbox" id="tsEnable" checked><span class="knob"></span></span>
-      </label>
+      <div class="divider"></div>
+      <div class="ts-pos-row">
+        <span class="ts-pos-label"><strong>표시 위치</strong></span>
+        <div class="ts-pos" id="tsPos">
+          <button type="button" data-pos="left">좌하단</button>
+          <button type="button" data-pos="center" class="active">중앙하단</button>
+          <button type="button" data-pos="right">우하단</button>
+        </div>
+      </div>
       <div class="divider"></div>
       <div class="field">
         <label for="tsStart">촬영 시작 날짜·시간</label>
@@ -5710,7 +5722,8 @@ if(document.readyState==='loading'){
   const tsStart = $('tsStart');
   const tsNote = $('tsNote');
   let tsBase = null;   // 영상 0초에 해당하는 시각 (epoch ms, 로컬 시간 기준)
-  let tsToken = 0;     // 영상이 바뀔 때마다 증가 — 늦게 끝난 이전 읽기 결과를 무시하기 위함
+  let tsToken = 0;
+  let tsPos = 'center';   // 'left' | 'center' | 'right' (하단 기준)     // 영상이 바뀔 때마다 증가 — 늦게 끝난 이전 읽기 결과를 무시하기 위함
   const TS_MONO = "Consolas, 'SF Mono', Menlo, monospace";
 
   // MP4의 mvhd 상자에서 촬영(생성) 시각을 읽습니다. 1904-01-01 UTC 기준 초 단위 값입니다.
@@ -5811,11 +5824,23 @@ if(document.readyState==='loading'){
     // 배경 상자 없이 글자만 그립니다. 밝은 영상에서도 읽히도록 약한 그림자만 줍니다.
     ctx.shadowColor = 'rgba(0,0,0,0.55)';
     ctx.shadowBlur = fs * 0.2;
-    ctx.fillText(text, stage.width / 2, cy);
+    const tw = ctx.measureText(text).width;
+    const margin = stage.width * 0.03;
+    const x = tsPos === 'left' ? margin + tw / 2
+            : tsPos === 'right' ? stage.width - margin - tw / 2
+            : stage.width / 2;
+    ctx.fillText(text, x, cy);
     ctx.restore();
   }
 
   tsEnable.addEventListener('change', () => drawFrame(undefined, {editing:true}));
+  document.querySelectorAll('#tsPos button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      tsPos = btn.dataset.pos;
+      document.querySelectorAll('#tsPos button').forEach(b => b.classList.toggle('active', b === btn));
+      drawFrame(undefined, {editing:true});
+    });
+  });
   tsStart.addEventListener('change', () => {
     const v = tsStart.value ? Date.parse(tsStart.value) : NaN;
     if(isNaN(v)){ setTsNote('날짜와 시간을 입력해 주세요.', 'err'); return; }
