@@ -5799,9 +5799,11 @@ if(document.readyState==='loading'){
     const d = new Date(Math.floor((tsBase + t*1000) / 1000) * 1000);
     const p = n => String(n).padStart(2,'0');
     const text = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}   ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-    const fs = Math.max(12, Math.round(stage.height * 0.054));
     const cy = stage.height * 0.938;
     ctx.save();
+    // 글자 폭이 화면 가로의 약 40%가 되도록 글자 크기를 맞춥니다(스샷의 원래 영상 시각과 같은 비율).
+    ctx.font = `400 100px ${TS_MONO}`;
+    const fs = Math.max(10, Math.round(100 * stage.width * 0.40 / ctx.measureText(text).width));
     ctx.font = `400 ${fs}px ${TS_MONO}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
