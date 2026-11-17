@@ -4330,11 +4330,23 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       let elapsed = 0;
       const done = new Promise((resolve) => { recorder.onstop = resolve; });
 
+      // 같은 화면을 MP4 녹화기로도 동시에 저장합니다(재생은 한 번만 하므로 시간이 늘지 않습니다).
+      const mp4Mime = getSupportedMp4RecorderMime();
+      let mp4Recorder = null, mp4Chunks = [], mp4Done = Promise.resolve();
+      if(mp4Mime){
+        try{
+          mp4Recorder = new MediaRecorder(stream, { mimeType: mp4Mime, videoBitsPerSecond: 2500000 });
+          mp4Recorder.ondataavailable = (e) => { if(e.data.size>0) mp4Chunks.push(e.data); };
+          mp4Done = new Promise((resolve) => { mp4Recorder.onstop = resolve; mp4Recorder.onerror = resolve; });
+        }catch(err){ console.warn('MP4 녹화기를 만들지 못했습니다.', err); mp4Recorder = null; }
+      }
+
       // captureStream은 recorder.start() 순간의 캔버스를 첫 프레임으로 잡을 수 있으므로 깨끗한 프레임을 먼저 그립니다.
       resetMotion();
       await seekTo(segments[0].start);
       drawFrame(segments[0].start, {editing:false});
       recorder.start();
+      if(mp4Recorder) mp4Recorder.start(1000);
       for(const seg of orderedSegments()){
         await seekTo(seg.start);
         resetMotion();
@@ -4349,9 +4361,18 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         elapsed += (seg.end - seg.start);
       }
       recorder.stop();
+      if(mp4Recorder && mp4Recorder.state !== 'inactive') mp4Recorder.stop();
       await done;
+      await mp4Done;
 
       const blob = new Blob(chunks, {type:'video/webm'});
+      let readyMp4 = null;
+      if(mp4Recorder && mp4Chunks.length){
+        try{
+          setExportProgress(100, 'MP4 파일 정리 중');
+          readyMp4 = await fixMp4Structure(new Blob(mp4Chunks, {type:'video/mp4'}));
+        }catch(err){ console.warn('MP4 정리 실패', err); readyMp4 = null; }
+      }
       const url = URL.createObjectURL(blob);
       exportResult.innerHTML = `
         <div class="notice ok">${ico('check-circle')}<div>렌더링 완료 · ${fmt(totalDur)} · ${fmtBytes(blob.size)}<br><span class="hint">아래 4단계에서 배부용 HTML을 만들거나, 영상 파일로 바로 저장할 수 있습니다.</span></div></div>
@@ -4361,7 +4382,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         </div>
         <div class="hint" id="mp4Status" style="margin-top:6px;">Windows 기본 영상 앱으로 보려면 MP4 저장을 사용하세요.</div>`;
       window.__lastExportBlob = blob;
-      window.__lastMobileMp4Blob = null;
+      window.__lastMobileMp4Blob = readyMp4;
       $('saveMp4Btn').addEventListener('click', saveLastExportAsMp4);
       saveHtmlPkgBtn.disabled = false;
       toast('렌더링이 완료되었습니다.', {type:'success'});
@@ -4477,9 +4498,9 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     setToolbarStatus('MP4 변환 중', 'busy');
     try{
       const outName = `edited_${Date.now()}.mp4`;
-      let mp4Blob = null;
+      let mp4Blob = window.__lastMobileMp4Blob || null;
       const directMime = getSupportedMp4RecorderMime();
-      if(directMime){
+      if(!mp4Blob && directMime){
         try{
           status.textContent = 'MP4 직접 렌더링 중... 영상 길이만큼 시간이 걸립니다.';
           mp4Blob = await renderSegmentsWithRecorder(directMime, (line) => { status.textContent = line; }, { fps: 24, videoBitsPerSecond: 2500000 });
@@ -5513,7 +5534,10 @@ if(document.readyState==='loading'){
     setToolbarStatus('배부용 HTML 생성 중', 'busy');
     try{
       const { name, pw, expiresAt } = getPackageFormValues();
-      const pkg = await buildPrivacyPackage(blob, name, pw, expiresAt);
+      const { mobileVideoBlob, mimeType } = await getMobileCompatibleMp4Blob(blob, name, (line) => {
+        $('savePkgMsg').innerHTML = `<div class="notice info">${ico('lock')}<div>${escapeHtml(line)}</div></div>`;
+      });
+      const pkg = await buildPrivacyPackage(mobileVideoBlob, name, pw, expiresAt, mimeType);
       const html = await buildMobileDistributionHtml(pkg);
       const outBlob = new Blob([html], {type:'text/html;charset=utf-8'});
       const url = URL.createObjectURL(outBlob);
