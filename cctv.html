@@ -862,7 +862,6 @@
             <button type="button" id="convertBtn" class="btn btn-sm btn-primary" disabled>MP4로 변환</button>
           </div>
           <div class="progress" id="aviProgressWrap"><div id="aviProgressBar"></div></div>
-          <button type="button" id="aviCancelBtn" class="btn" style="margin-top:8px;display:none;">변환 취소</button>
           <div id="aviResult" class="hint" style="margin-top:8px;"></div>
           <div id="aviProtocolWarning" class="notice danger" style="margin-top:8px; display:none;">
             <svg class="ic"><use href="#ic-alert"/></svg>
@@ -1553,33 +1552,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     return filenameRecordedTime(file.name);
   }
 
-  // AVI 헤더의 영상 코덱 이름(FourCC, 예: H264, MJPG, DIVX)을 읽습니다. 못 읽으면 빈 문자열.
-  async function readAviVideoFourcc(file){
-    try{
-      const buf = new Uint8Array(await file.slice(0, Math.min(file.size, 1024*1024)).arrayBuffer());
-      const find = (sig, from) => {
-        outer: for(let i = from; i <= buf.length - sig.length; i++){
-          for(let k = 0; k < sig.length; k++) if(buf[i+k] !== sig.charCodeAt(k)) continue outer;
-          return i;
-        }
-        return -1;
-      };
-      const str = (i) => String.fromCharCode(buf[i], buf[i+1], buf[i+2], buf[i+3]);
-      let pos = 0;
-      while(true){
-        const strh = find('strh', pos);
-        if(strh < 0) return '';
-        if(str(strh + 8) === 'vids'){
-          const strf = find('strf', strh);
-          if(strf < 0) return '';
-          return str(strf + 8 + 16).replace(/\0/g, '').trim();   // biCompression
-        }
-        pos = strh + 4;
-      }
-    }catch(err){ return ''; }
-  }
-  const H264_FOURCC = ['H264', 'X264', 'AVC1', 'h264', 'x264', 'avc1', 'HAVC'];
-
   convertBtn.addEventListener('click', async () => {
     if(!aviFile) return;
     if(location.protocol === 'file:'){
@@ -1589,70 +1561,28 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         '<span class="hint">이 HTML을 웹서버에 올린 뒤 <code>https://</code> 주소로 접속해 주세요.</span>';
       return;
     }
-    // 2GB 이상은 메모리 부담이 커서 시작 전에 한 번 확인합니다.
-    if(aviFile.size >= 2 * 1024 * 1024 * 1024){
-      const go = await dialog({
-        title:'큰 파일입니다',
-        message:`파일 크기가 약 ${(aviFile.size / 1024 / 1024 / 1024).toFixed(1)}GB입니다. 메모리가 부족한 PC에서는 변환이 멈출 수 있습니다.\n다른 탭을 닫은 뒤 진행할까요?`,
-        confirmText:'변환 시작'
-      });
-      if(!go) return;
-    }
-
     convertBtn.disabled = true;
-    let convCancelled = false;
-    let lastProgressAt = Date.now();
     $('aviProgressWrap').classList.add('show');
-    $('aviCancelBtn').style.display = '';
     $('aviProgressBar').style.width = '0%';
     $('aviResult').textContent = '변환 엔진을 불러오는 중입니다. 최초 1회만 수십 MB를 내려받습니다.';
     setToolbarStatus('AVI → MP4 변환 중', 'busy');
-    // 진행률이 1분 넘게 바뀌지 않으면 멈춘 것으로 보고 안내합니다(자동 중단은 하지 않습니다).
-    const stallTimer = setInterval(() => {
-      if(Date.now() - lastProgressAt > 60000){
-        $('aviResult').innerHTML = `<div class="notice danger">${ico('alert')}<div>진행률이 1분 넘게 바뀌지 않아 멈춘 것 같습니다. 다른 탭을 닫아 메모리를 확보하거나, <strong>변환 취소</strong> 후 다시 시도해 주세요.</div></div>`;
-      }
-    }, 5000);
     try{
       const libs = await loadFFmpegLibs();
       const ff = await ensureFFmpegLoaded();
-      $('aviCancelBtn').onclick = () => { convCancelled = true; try{ ff.terminate(); }catch(_){} };
       ff.on('progress', ({progress}) => {
-        lastProgressAt = Date.now();
         const pct = Math.min(100, Math.max(0, progress*100));
         $('aviProgressBar').style.width = pct + '%';
       });
       $('aviResult').textContent = '변환 중입니다...';
       const inName = 'input' + (aviFile.name.match(/\.[a-zA-Z0-9]+$/) || ['.avi'])[0];
       await ff.writeFile(inName, await libs.fetchFile(aviFile));
-
-      // MP4의 촬영일시는 원본의 기록 시각으로 맞춥니다(변환 시각이 찍히지 않도록). 기록이 없으면 1970년으로 두어 표시하지 않습니다.
+      await ff.exec(['-i', inName, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', 'output.mp4']);
+      // MP4의 촬영일시가 변환 시각(지금)으로 찍히지 않도록, 원본의 기록 시각으로 바꿉니다.
+      // 기록 시각을 찾지 못하면 1970년으로 두어 날짜·시간이 표시되지 않게 합니다.
       const recordedMs = await readAviRecordedTime(aviFile);
       const creationIso = recordedMs ? new Date(recordedMs).toISOString() : '1970-01-01T00:00:00Z';
-      const meta = ['-metadata', `creation_time=${creationIso}`];
-
-      // 1단계: 영상은 다시 압축하지 않고 그대로 복사합니다(DVR 영상 대부분 H.264). 음성은 AAC로 가볍게 변환하고, 자막·시각 텍스트 스트림은 제외합니다.
-      const fourcc = await readAviVideoFourcc(aviFile);
-      const isH264 = H264_FOURCC.includes(fourcc);
-      let mode = 'copy';
-      let code = 1;
-      if(isH264){
-        code = await ff.exec(['-fflags', '+genpts', '-i', inName, '-map', '0:v:0', '-c:v', 'copy', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', '-sn', '-dn', '-avoid_negative_ts', 'make_zero', ...meta, '-movflags', '+faststart', 'output.mp4']);
-        if(convCancelled) throw new Error('cancelled');
-      }
-      if(code !== 0){
-        // 2단계: 그대로 복사할 수 없는 코덱이면 H.264로 다시 인코딩합니다.
-        mode = 'encode';
-        try{ await ff.deleteFile('output.mp4'); }catch(_){}
-        $('aviResult').textContent = isH264
-          ? '이 영상은 그대로 복사할 수 없어 다시 압축하고 있습니다. 시간이 더 걸립니다.'
-          : `영상 코덱(${fourcc || '알 수 없음'})은 H.264가 아니어서 다시 압축하고 있습니다. 시간이 더 걸립니다.`;
-        lastProgressAt = Date.now();
-        code = await ff.exec(['-i', inName, '-map', '0:v:0', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'fastdecode', '-crf', '26', '-pix_fmt', 'yuv420p', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', '-sn', '-dn', ...meta, '-movflags', '+faststart', 'output.mp4']);
-        if(convCancelled) throw new Error('cancelled');
-        if(code !== 0) throw new Error('영상 변환에 실패했습니다(코덱 미지원 또는 손상 가능).');
-      }
-      const data = await ff.readFile('output.mp4');
+      await ff.exec(['-i', 'output.mp4', '-c', 'copy', '-metadata', `creation_time=${creationIso}`, '-movflags', '+faststart', 'output2.mp4']);
+      const data = await ff.readFile('output2.mp4');
       const blob = new Blob([data.buffer], {type:'video/mp4'});
       const url = URL.createObjectURL(blob);
       const outName = (aviFile.name.replace(/\.[^.]+$/, '') || 'converted') + '.mp4';
@@ -1667,12 +1597,8 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       $('loadConvertedBtn').addEventListener('click', () => {
         loadVideoBlob(blob, {name:outName, size:blob.size, lastModified:0, type:'video/mp4'});
       });
-      toast(mode === 'copy' ? 'AVI → MP4 변환이 완료되었습니다. (재인코딩 없이 빠르게 처리)' : 'AVI → MP4 변환이 완료되었습니다. (재인코딩 방식)', {type:'success'});
+      toast('AVI → MP4 변환이 완료되었습니다.', {type:'success'});
     } catch(err){
-      if(convCancelled){
-        $('aviResult').innerHTML = '<span class="hint">변환을 취소했습니다. 필요하면 다시 시도하세요.</span>';
-        return;
-      }
       console.error(err);
       const msg = (err && (err.message || err.toString())) || '알 수 없는 오류';
       const isFileProto = location.protocol === 'file:';
@@ -1681,8 +1607,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
           ? '이 파일을 file:// 방식(더블클릭)으로 열고 있어 변환 엔진을 내려받지 못했을 가능성이 높습니다.'
           : '파일이 손상되었거나 지원되지 않는 코덱이거나, 네트워크(방화벽/사내망)에서 변환 엔진(cdn.jsdelivr.net) 접속이 차단되었을 수 있습니다. 다른 프로그램으로 MP4 변환 후 불러오는 방법도 있습니다.'}</span></div></div>`;
     } finally {
-      clearInterval(stallTimer);
-      $('aviCancelBtn').style.display = 'none';
       $('aviProgressWrap').classList.remove('show');
       convertBtn.disabled = false;
       setToolbarStatus();
@@ -1741,7 +1665,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const videoName = currentSourceMeta?.name || (srcVideo.dataset.sourceName || '');
     return {
       format:'cctv-editor-project',
-      version:4,
+      version:3,
       savedAt:new Date().toISOString(),
       sourceVideo:{
         name:videoName,
@@ -1773,11 +1697,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         days:$('pkgDays')?.value || '30',
         expireDate:$('pkgExpireDate')?.value || '',
         expireTime:$('pkgExpireTime')?.value || '23:59'
-      },
-      timestamp:{
-        enabled:!!tsEnable?.checked,
-        pos:tsPos,
-        baseMs:tsBase == null ? null : Number(tsBase)
       }
     };
   }
@@ -1834,7 +1753,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       if(!ok) return false;
     }
 
-    applyTimestampState(state.timestamp);
     regions = state.regions.map(r => normalizeProjectRegion(r,false));
     revealRegions = state.revealRegions.map(r => normalizeProjectRegion(r,true));
     completedRegionIds = new Set(Array.isArray(state.completedRegionIds) ? state.completedRegionIds : []);
@@ -2498,8 +2416,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     }
     srcVideo.play().then(() => {
       setPlaying(true); playbackFinished = false;
-      scheduleLoop();
-      scheduleUiLoop();
+      requestAnimationFrame(loop);
     }).catch(() => {});
   }
   function pausePlayback(){
@@ -2576,20 +2493,8 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     }
     updateActiveTrackers(srcVideo.currentTime);
     drawFrame(undefined, {editing:true});
-    scheduleLoop();
-  }
-  // 영상 캔버스는 실제 새 프레임이 도착했을 때만 다시 그리고,
-  // 재생 위치 표시만 화면 주사율에 맞춰 별도 갱신해 진행바의 끊김을 줄입니다.
-  function uiPlaybackLoop(){
-    if(!playing) return;
     updateTimeUI();
-    requestAnimationFrame(uiPlaybackLoop);
-  }
-  function scheduleUiLoop(){ requestAnimationFrame(uiPlaybackLoop); }
-  // 영상에 새 프레임이 나올 때만 편집 캔버스를 갱신합니다.
-  function scheduleLoop(){
-    if(typeof srcVideo.requestVideoFrameCallback === 'function') srcVideo.requestVideoFrameCallback(loop);
-    else requestAnimationFrame(loop);
+    requestAnimationFrame(loop);
   }
 
   // 재생 진행바는 남아 있는 구간만 표시합니다. 삭제 구간은 빈 공간으로 남습니다.
@@ -2858,10 +2763,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const bs = Math.max(2, block);
     const bw = Math.max(1, Math.round(w/bs));
     const bh = Math.max(1, Math.round(h/bs));
-    // 캔버스 크기를 매 프레임 바꾸면 메모리를 다시 할당해 끊김이 생기므로, 커질 때만 키우고 일부 영역만 씁니다.
-    if(tempCanvas.width < bw) tempCanvas.width = bw;
-    if(tempCanvas.height < bh) tempCanvas.height = bh;
-    tempCtx.clearRect(0, 0, bw, bh);
+    tempCanvas.width = bw; tempCanvas.height = bh;
     tempCtx.imageSmoothingEnabled = true;
     tempCtx.drawImage(stage, x, y, w, h, 0, 0, bw, bh);
     ctx.save();
@@ -2873,13 +2775,8 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const opacity = Number(mosaicOpacity.value) / 100;
     ctx.globalAlpha = opacity;
     ctx.drawImage(tempCanvas, 0,0,bw,bh, x,y,w,h);
-    if(opacity < 0.999){
-      // 영역 부분만 원본에서 잘라 그립니다(화면 전체를 영역마다 다시 그리지 않음).
-      ctx.globalAlpha = 1 - opacity;
-      const vw = srcVideo.videoWidth || stage.width, vh = srcVideo.videoHeight || stage.height;
-      const kx = vw / stage.width, ky = vh / stage.height;
-      ctx.drawImage(srcVideo, x*kx, y*ky, w*kx, h*ky, x, y, w, h);
-    }
+    ctx.globalAlpha = 1 - opacity;
+    ctx.drawImage(srcVideo, 0, 0, stage.width, stage.height);
     ctx.globalAlpha = 1;
     ctx.restore();
   }
@@ -3153,8 +3050,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const cols = motion.cols;
     const rows = Math.max(32, Math.round(cols * stage.height / stage.width));
     motion.rows = rows;
-    if(motionCanvas.width !== cols) motionCanvas.width = cols;
-    if(motionCanvas.height !== rows) motionCanvas.height = rows;
+    motionCanvas.width = cols; motionCanvas.height = rows;
     motionCtx.drawImage(srcVideo, 0, 0, cols, rows);
     const px = motionCtx.getImageData(0, 0, cols, rows).data;
     const n = cols * rows;
@@ -3475,11 +3371,9 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
   function makeTrackingTemplate(region,t){
     const rect=getRectAtTime(region,t);
     if(!rect || rect.w<12 || rect.h<12) return null;
-    if(trackCanvas.width!==stage.width) trackCanvas.width=stage.width;
-    if(trackCanvas.height!==stage.height) trackCanvas.height=stage.height;
+    trackCanvas.width=stage.width; trackCanvas.height=stage.height;
     trackCtx.drawImage(srcVideo,0,0,stage.width,stage.height);
     const frame=trackCtx.getImageData(0,0,stage.width,stage.height).data;
-    trackFrameCache={t:-1,data:null};
     const patches=PATCH_POINTS.map(([rx,ry,rw,rh])=>samplePatch(frame,stage.width,stage.height, rect.x+rect.w*rx,rect.y+rect.h*ry,rect.w*rw,rect.h*rh));
     return {patches,w:rect.w,h:rect.h,rect:{...rect},lastT:t};
   }
@@ -3489,7 +3383,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     for(let i=0;i<p.vals.length;i++) dot+=p.vals[i]*patch.vals[i];
     return dot;
   }
-  let trackFrameCache = {t:-1, data:null};
   function trackRegionAtTime(region,t){
     const tr=region.tracking;
     if(!tr || !tr.active || !duration) return;
@@ -3497,16 +3390,9 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const prev=tr.lastRect || getRectAtTime(region,tr.lastT);
     if(!prev) return;
     try{
-      // 같은 시점에 영역이 여러 개여도 프레임은 한 번만 읽습니다(전체 해상도 getImageData는 매우 무겁습니다).
-      let frame;
-      if(trackFrameCache.t===t && trackFrameCache.data){ frame=trackFrameCache.data; }
-      else{
-        if(trackCanvas.width!==stage.width) trackCanvas.width=stage.width;
-        if(trackCanvas.height!==stage.height) trackCanvas.height=stage.height;
-        trackCtx.drawImage(srcVideo,0,0,stage.width,stage.height);
-        frame=trackCtx.getImageData(0,0,stage.width,stage.height).data;
-        trackFrameCache={t,data:frame};
-      }
+      trackCanvas.width=stage.width; trackCanvas.height=stage.height;
+      trackCtx.drawImage(srcVideo,0,0,stage.width,stage.height);
+      const frame=trackCtx.getImageData(0,0,stage.width,stage.height).data;
       const maxDim=Math.max(prev.w,prev.h);
       const speed=Math.min(1.8,Math.max(0.7,(t-tr.lastT)/0.06));
       const radius=Math.max(35,Math.min(220,maxDim*0.95*speed));
@@ -4416,27 +4302,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
   }
   function hideExportProgress(){ progressWrap.classList.remove('show'); progressLabel.hidden = true; }
 
-  // 캔버스 녹화의 첫 프레임이 인코더 시작 뒤 늦게 들어오는 현상을 방지합니다.
-  // requestFrame()을 지원하는 브라우저에서는 프레임을 직접 제출해 시작 타이밍을 고정합니다.
-  let activeExportCaptureTrack = null;
-  function createExportCapture(fps){
-    let stream = stage.captureStream(0);
-    let track = stream.getVideoTracks()[0];
-    if(track && typeof track.requestFrame === 'function'){
-      activeExportCaptureTrack = track;
-      return stream;
-    }
-    // requestFrame 미지원 브라우저는 기존 자동 캡처 방식으로 안전하게 대체합니다.
-    stream.getTracks().forEach(t => t.stop());
-    activeExportCaptureTrack = null;
-    return stage.captureStream(fps || 30);
-  }
-  function submitExportFrame(){
-    if(activeExportCaptureTrack && typeof activeExportCaptureTrack.requestFrame === 'function'){
-      try{ activeExportCaptureTrack.requestFrame(); }catch(err){ console.warn('렌더링 프레임 제출 실패', err); }
-    }
-  }
-
   exportBtn.addEventListener('click', async () => {
     if(segments.length === 0){ toast('내보낼 구간이 없습니다.', {type:'warn'}); return; }
     if(exporting) return;
@@ -4454,12 +4319,11 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     srcVideo.pause(); setPlaying(false);
     const started = performance.now();
     try{
-      const stream = createExportCapture(30);
-      // VP9는 소프트웨어 인코딩이라 MP4(H.264, 하드웨어) 녹화와 동시에 돌리면 프레임이 밀려 끊깁니다. 가벼운 VP8을 우선 사용합니다.
-      let mimeType = 'video/webm;codecs=vp8';
-      if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp9';
+      const stream = stage.captureStream(30);
+      let mimeType = 'video/webm;codecs=vp9';
+      if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8';
       if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4000000 });
+      const recorder = new MediaRecorder(stream, { mimeType });
       const chunks = [];
       recorder.ondataavailable = (e) => { if(e.data.size>0) chunks.push(e.data); };
       const totalDur = segments.reduce((a,s) => a + (s.end-s.start), 0) || 1;
@@ -4483,14 +4347,11 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       drawFrame(segments[0].start, {editing:false});
       recorder.start();
       if(mp4Recorder) mp4Recorder.start(1000);
-      submitExportFrame();
-      const renderList = orderedSegments();
-      for(let segmentIndex=0; segmentIndex<renderList.length; segmentIndex++){
-        const seg = renderList[segmentIndex];
-        // 첫 구간은 녹화기 시작 직전에 이미 seek/draw를 마쳤으므로 중복 seek를 생략합니다.
-        if(segmentIndex > 0) await seekTo(seg.start);
+      for(const seg of orderedSegments()){
+        await seekTo(seg.start);
         resetMotion();
         drawFrame(seg.start, {editing:false});
+        await new Promise(requestAnimationFrame);
         await playSegment(seg, (t) => {
           const p = (elapsed + (t-seg.start))/totalDur;
           const remain = p > 0.02 ? ((performance.now()-started)/1000) * (1-p)/p : null;
@@ -4505,11 +4366,12 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       await mp4Done;
 
       const blob = new Blob(chunks, {type:'video/webm'});
-      // MP4 구조 정리(ffmpeg 엔진 필요)는 렌더링 완료를 막지 않도록 'MP4로 PC 저장' 때 수행합니다.
       let readyMp4 = null;
       if(mp4Recorder && mp4Chunks.length){
-        readyMp4 = new Blob(mp4Chunks, {type:'video/mp4'});
-        readyMp4.__needsFix = true;
+        try{
+          setExportProgress(100, 'MP4 파일 정리 중');
+          readyMp4 = await fixMp4Structure(new Blob(mp4Chunks, {type:'video/mp4'}));
+        }catch(err){ console.warn('MP4 정리 실패', err); readyMp4 = null; }
       }
       const url = URL.createObjectURL(blob);
       exportResult.innerHTML = `
@@ -4534,55 +4396,19 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       exportBtn.disabled = false;
       setToolbarStatus();
       resetMotion();
-      if(activeExportCaptureTrack){ try{ activeExportCaptureTrack.stop(); }catch(_){} }
-      activeExportCaptureTrack = null;
       rerender();
       updateTimeUI();
       if(wasPlaying){ startPlayback(); }
     }
   });
 
-  // seeked는 탐색 명령의 완료일 뿐, 새 영상 프레임이 실제 표시 가능한 상태라는 보장은 없습니다.
-  // 렌더링 시작/구간 전환 때 이전 프레임이 잠시 남는 현상을 막기 위해 표시 프레임까지 확인합니다.
-  function waitForPresentedVideoFrame(timeoutMs = 420){
+  function seekTo(t){
     return new Promise((resolve) => {
-      let settled = false;
-      let timer = null;
-      const finish = (meta) => {
-        if(settled) return;
-        settled = true;
-        if(timer) clearTimeout(timer);
-        resolve(meta || null);
-      };
-      if(typeof srcVideo.requestVideoFrameCallback === 'function'){
-        try{ srcVideo.requestVideoFrameCallback((_now, meta) => finish(meta)); }
-        catch(_){ finish(null); }
-        timer = setTimeout(() => finish(null), timeoutMs);
-      }else{
-        requestAnimationFrame(() => requestAnimationFrame(() => finish(null)));
-      }
+      if(Math.abs(srcVideo.currentTime - t) < 0.0005 && srcVideo.readyState >= 2){ resolve(); return; }
+      const handler = () => { srcVideo.removeEventListener('seeked', handler); resolve(); };
+      srcVideo.addEventListener('seeked', handler);
+      srcVideo.currentTime = t;
     });
-  }
-  async function seekTo(t){
-    const target = clampNum(t, 0, duration || t);
-    if(Math.abs(srcVideo.currentTime - target) < 0.0005 && srcVideo.readyState >= 2) return;
-    // 탐색 명령보다 먼저 프레임 콜백을 등록해야 seek 직후 제출되는 첫 프레임을 놓치지 않습니다.
-    const presentedFrame = waitForPresentedVideoFrame(650);
-    await new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if(settled) return;
-        settled = true;
-        srcVideo.removeEventListener('seeked', finish);
-        srcVideo.removeEventListener('error', finish);
-        resolve();
-      };
-      srcVideo.addEventListener('seeked', finish, {once:true});
-      srcVideo.addEventListener('error', finish, {once:true});
-      srcVideo.currentTime = target;
-      if(Math.abs(srcVideo.currentTime - target) < 0.0005 && srcVideo.readyState >= 2) finish();
-    });
-    await presentedFrame;
   }
 
   function getSupportedMp4RecorderMime(){
@@ -4603,7 +4429,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     setPlaying(false);
     exporting = true;
     try{
-      const stream = createExportCapture(options.fps || 24);
+      const stream = stage.captureStream(options.fps || 24);
       const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: options.videoBitsPerSecond || 2500000 });
       const chunks = [];
       recorder.ondataavailable = (e) => { if(e.data.size>0) chunks.push(e.data); };
@@ -4619,14 +4445,11 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         drawFrame(segments[0].start, {editing:false});
       }
       recorder.start(1000);
-      submitExportFrame();
-      const renderList = orderedSegments();
-      for(let segmentIndex=0; segmentIndex<renderList.length; segmentIndex++){
-        const seg = renderList[segmentIndex];
-        // 첫 구간은 녹화 시작 전에 이미 seek/draw 했으므로 중복 탐색으로 인한 대기를 없앱니다.
-        if(segmentIndex > 0) await seekTo(seg.start);
+      for(const seg of orderedSegments()){
+        await seekTo(seg.start);
         resetMotion();
         drawFrame(seg.start, {editing:false});
+        await new Promise(requestAnimationFrame);
         await playSegment(seg, (t) => {
           const percent = Math.min(100, Math.round(((elapsed + (t-seg.start))/totalDur) * 100));
           if(onProgress) onProgress(`휴대폰용 MP4 직접 렌더링 ${percent}%`, 20 + Math.round(percent * 0.55));
@@ -4640,9 +4463,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     } finally {
       exporting = false;
       resetMotion();
-      if(activeExportCaptureTrack){ try{ activeExportCaptureTrack.stop(); }catch(_){} }
-      if(activeExportCaptureTrack){ try{ activeExportCaptureTrack.stop(); }catch(_){} }
-      activeExportCaptureTrack = null;
       rerender();
       if(wasPlaying) startPlayback();
     }
@@ -4650,14 +4470,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
 
   // 브라우저 MP4 녹화 결과는 길이 정보가 비어 있어 플레이어에서 플레이바가 움직이지 않습니다.
   // 화질은 그대로 두고(재인코딩 없이) 파일 구조만 고쳐서 길이와 탐색 정보를 채웁니다.
-  async function fixMp4Structure(blob, timeoutMs = 45000){
-    // 엔진을 받지 못하거나 응답이 없으면 기다리지 않고 원본을 그대로 씁니다.
-    let timer;
-    const timeout = new Promise((resolve) => { timer = setTimeout(() => { console.warn('MP4 정리 시간 초과 - 원본 사용'); resolve(blob); }, timeoutMs); });
-    try{ return await Promise.race([fixMp4StructureInner(blob), timeout]); }
-    finally{ clearTimeout(timer); }
-  }
-  async function fixMp4StructureInner(blob){
+  async function fixMp4Structure(blob){
     try{
       const libs = await loadFFmpegLibs();
       const ff = await ensureFFmpegLoaded();
@@ -4686,12 +4499,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     try{
       const outName = `edited_${Date.now()}.mp4`;
       let mp4Blob = window.__lastMobileMp4Blob || null;
-      if(mp4Blob && mp4Blob.__needsFix){
-        status.textContent = 'MP4 파일 정리 중... (최대 45초)';
-        const fixed = await fixMp4Structure(mp4Blob);
-        if(fixed !== mp4Blob) window.__lastMobileMp4Blob = fixed;
-        mp4Blob = fixed;
-      }
       const directMime = getSupportedMp4RecorderMime();
       if(!mp4Blob && directMime){
         try{
@@ -4768,57 +4575,15 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
 
   function playSegment(seg, onProgress){
     return new Promise((resolve) => {
-      let lastCt = -1;
-      let finished = false;
-      let callbackId = null;
-      const finish = () => {
-        if(finished) return;
-        finished = true;
-        if(callbackId != null && typeof srcVideo.cancelVideoFrameCallback === 'function'){
-          try{ srcVideo.cancelVideoFrameCallback(callbackId); }catch(_){}
-        }
-        srcVideo.pause();
-        resolve();
-      };
-      // 실제 디코더가 새 프레임을 제출할 때만 캔버스를 그리고 녹화기에 전달합니다.
-      // requestAnimationFrame 폴링으로 동일 프레임을 반복 제출하거나 첫 프레임을 놓치는 일을 방지합니다.
-      const onVideoFrame = (_now, metadata) => {
-        if(finished) return;
-        const ct = Math.max(srcVideo.currentTime || 0, Number(metadata?.mediaTime) || 0);
-        if(ct !== lastCt){
-          lastCt = ct;
-          updateActiveTrackers(ct);
-          try{ onProgress(ct); }catch(_){}
-          drawFrame(ct, {editing:false});
-          submitExportFrame();
-        }
-        if(ct >= seg.end - 0.02 || srcVideo.paused || srcVideo.ended){ finish(); return; }
-        callbackId = srcVideo.requestVideoFrameCallback(onVideoFrame);
-      };
-      const fallbackStep = () => {
-        if(finished) return;
-        const ct = srcVideo.currentTime || 0;
-        if(ct !== lastCt){
-          lastCt = ct;
-          updateActiveTrackers(ct);
-          try{ onProgress(ct); }catch(_){}
-          drawFrame(ct, {editing:false});
-          submitExportFrame();
-        }
-        if(ct >= seg.end - 0.02 || srcVideo.paused || srcVideo.ended){ finish(); return; }
-        requestAnimationFrame(fallbackStep);
-      };
-      // 구간 시작 프레임을 먼저 표시·제출하고 재생을 시작합니다.
-      drawFrame(seg.start, {editing:false});
-      submitExportFrame();
-      try{ onProgress(seg.start); }catch(_){}
-      srcVideo.play().then(() => {
-        if(typeof srcVideo.requestVideoFrameCallback === 'function'){
-          callbackId = srcVideo.requestVideoFrameCallback(onVideoFrame);
-        }else{
-          requestAnimationFrame(fallbackStep);
-        }
-      }).catch(() => finish());
+      srcVideo.play();
+      function step(){
+        updateActiveTrackers(srcVideo.currentTime);
+        onProgress(srcVideo.currentTime);
+        drawFrame(srcVideo.currentTime, {editing:false}); // 편집용 표시선은 녹화되지 않습니다.
+        if(srcVideo.currentTime >= seg.end - 0.02 || srcVideo.paused){ srcVideo.pause(); resolve(); return; }
+        requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
     });
   }
 
@@ -6039,24 +5804,7 @@ if(document.readyState==='loading'){
   const tsNote = $('tsNote');
   let tsBase = null;   // 영상 0초에 해당하는 시각 (epoch ms, 로컬 시간 기준)
   let tsToken = 0;
-  let tsPos = 'center';   // 'left' | 'center' | 'right' (하단 기준)
-  let tsFromProject = null; // 영상 로딩 중에 적용될 프로젝트 저장값
-  let tsResolving = false;
-
-  // 프로젝트 파일 또는 자동 저장본의 날짜·시간 설정을 화면에 반영합니다.
-  function applyTimestampState(ts){
-    if(!ts) return;
-    if(tsResolving) tsFromProject = ts;   // 영상 읽기가 끝난 뒤 덮어쓰이지 않도록 기억해 둡니다.
-    tsPos = ['left','center','right'].includes(ts.pos) ? ts.pos : 'center';
-    document.querySelectorAll('#tsPos button').forEach(b => b.classList.toggle('active', b.dataset.pos === tsPos));
-    tsEnable.checked = ts.enabled !== false;
-    if(ts.baseMs != null){
-      tsBase = Number(ts.baseMs);
-      tsStart.value = tsFormatInput(tsBase);
-      setTsNote('프로젝트에 저장된 촬영 시각을 사용합니다.', 'ok');
-    }
-    tsEnable.dispatchEvent(new Event('change'));   // 스위치 모양과 화면을 함께 갱신
-  }     // 영상이 바뀔 때마다 증가 — 늦게 끝난 이전 읽기 결과를 무시하기 위함
+  let tsPos = 'center';   // 'left' | 'center' | 'right' (하단 기준)     // 영상이 바뀔 때마다 증가 — 늦게 끝난 이전 읽기 결과를 무시하기 위함
   const TS_MONO = "Consolas, 'SF Mono', Menlo, monospace";
 
   // MP4의 mvhd 상자에서 촬영(생성) 시각을 읽습니다. 1904-01-01 UTC 기준 초 단위 값입니다.
@@ -6132,26 +5880,12 @@ if(document.readyState==='loading'){
     note.className = 'field-note' + (cls ? ' ' + cls : '');
   }
 
-  // 영상이 바뀔 때 촬영 시각을 다시 읽습니다. 읽는 동안에만 프로젝트 저장값을 기억합니다.
   async function resolveTimestampBase(blob, meta){
-    tsResolving = true;
-    try{ await resolveTimestampBaseInner(blob, meta); }
-    finally{ tsResolving = false; }
-  }
-  async function resolveTimestampBaseInner(blob, meta){
     const token = ++tsToken;
     tsBase = null;
     const mp4Ms = await readMp4CreationTime(blob);
     if(token !== tsToken) return;
     const ms = mp4Ms ?? (meta && meta.name ? filenameRecordedTime(meta.name) : null);
-    if(tsFromProject && tsFromProject.baseMs != null){
-      tsBase = Number(tsFromProject.baseMs);
-      tsStart.value = tsFormatInput(tsBase);
-      setTsNote('프로젝트에 저장된 촬영 시각을 사용합니다.', 'ok');
-      tsFromProject = null;
-      drawFrame(undefined, {editing:true});
-      return;
-    }
     tsBase = ms;
     if(ms != null){
       tsStart.value = tsFormatInput(ms);
@@ -6191,11 +5925,10 @@ if(document.readyState==='loading'){
     ctx.restore();
   }
 
-  tsEnable.addEventListener('change', () => { drawFrame(undefined, {editing:true}); scheduleAutosave(); });
+  tsEnable.addEventListener('change', () => drawFrame(undefined, {editing:true}));
   document.querySelectorAll('#tsPos button').forEach(btn => {
     btn.addEventListener('click', () => {
       tsPos = btn.dataset.pos;
-      scheduleAutosave();
       document.querySelectorAll('#tsPos button').forEach(b => b.classList.toggle('active', b === btn));
       drawFrame(undefined, {editing:true});
     });
@@ -6206,7 +5939,6 @@ if(document.readyState==='loading'){
     tsBase = v;
     setTsNote('직접 입력한 시각으로 표시합니다.', 'ok');
     drawFrame(undefined, {editing:true});
-    scheduleAutosave();
   });
 
   blockPageInspection();
