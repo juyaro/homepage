@@ -4411,6 +4411,27 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
   }
   function hideExportProgress(){ progressWrap.classList.remove('show'); progressLabel.hidden = true; }
 
+  // 캔버스 녹화의 첫 프레임이 인코더 시작 뒤 늦게 들어오는 현상을 방지합니다.
+  // requestFrame()을 지원하는 브라우저에서는 프레임을 직접 제출해 시작 타이밍을 고정합니다.
+  let activeExportCaptureTrack = null;
+  function createExportCapture(fps){
+    let stream = stage.captureStream(0);
+    let track = stream.getVideoTracks()[0];
+    if(track && typeof track.requestFrame === 'function'){
+      activeExportCaptureTrack = track;
+      return stream;
+    }
+    // requestFrame 미지원 브라우저는 기존 자동 캡처 방식으로 안전하게 대체합니다.
+    stream.getTracks().forEach(t => t.stop());
+    activeExportCaptureTrack = null;
+    return stage.captureStream(fps || 30);
+  }
+  function submitExportFrame(){
+    if(activeExportCaptureTrack && typeof activeExportCaptureTrack.requestFrame === 'function'){
+      try{ activeExportCaptureTrack.requestFrame(); }catch(err){ console.warn('렌더링 프레임 제출 실패', err); }
+    }
+  }
+
   exportBtn.addEventListener('click', async () => {
     if(segments.length === 0){ toast('내보낼 구간이 없습니다.', {type:'warn'}); return; }
     if(exporting) return;
@@ -4428,7 +4449,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     srcVideo.pause(); setPlaying(false);
     const started = performance.now();
     try{
-      const stream = stage.captureStream(30);
+      const stream = createExportCapture(30);
       // VP9는 소프트웨어 인코딩이라 MP4(H.264, 하드웨어) 녹화와 동시에 돌리면 프레임이 밀려 끊깁니다. 가벼운 VP8을 우선 사용합니다.
       let mimeType = 'video/webm;codecs=vp8';
       if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp9';
@@ -4457,6 +4478,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       drawFrame(segments[0].start, {editing:false});
       recorder.start();
       if(mp4Recorder) mp4Recorder.start(1000);
+      submitExportFrame();
       for(const seg of orderedSegments()){
         await seekTo(seg.start);
         resetMotion();
@@ -4505,6 +4527,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       exportBtn.disabled = false;
       setToolbarStatus();
       resetMotion();
+      activeExportCaptureTrack = null;
       rerender();
       updateTimeUI();
       if(wasPlaying){ startPlayback(); }
@@ -4538,7 +4561,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     setPlaying(false);
     exporting = true;
     try{
-      const stream = stage.captureStream(options.fps || 24);
+      const stream = createExportCapture(options.fps || 24);
       const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: options.videoBitsPerSecond || 2500000 });
       const chunks = [];
       recorder.ondataavailable = (e) => { if(e.data.size>0) chunks.push(e.data); };
@@ -4554,6 +4577,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         drawFrame(segments[0].start, {editing:false});
       }
       recorder.start(1000);
+      submitExportFrame();
       for(const seg of orderedSegments()){
         await seekTo(seg.start);
         resetMotion();
@@ -4572,6 +4596,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     } finally {
       exporting = false;
       resetMotion();
+      activeExportCaptureTrack = null;
       rerender();
       if(wasPlaying) startPlayback();
     }
@@ -4697,7 +4722,6 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
 
   function playSegment(seg, onProgress){
     return new Promise((resolve) => {
-      srcVideo.play();
       function step(){
         const ct = srcVideo.currentTime;
         // 같은 프레임은 다시 처리하지 않습니다. 종료 판단은 아래에서 매번 하므로 영상 끝에서도 멈추지 않습니다.
@@ -4706,12 +4730,13 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
           updateActiveTrackers(ct);
           onProgress(ct);
           drawFrame(ct, {editing:false}); // 편집용 표시선은 녹화되지 않습니다.
+          submitExportFrame();
         }
         if(ct >= seg.end - 0.02 || srcVideo.paused || srcVideo.ended){ srcVideo.pause(); resolve(); return; }
         requestAnimationFrame(step);
       }
       let lastCt = -1;
-      requestAnimationFrame(step);
+      srcVideo.play().then(() => requestAnimationFrame(step)).catch(() => resolve());
     });
   }
 
