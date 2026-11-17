@@ -2499,6 +2499,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     srcVideo.play().then(() => {
       setPlaying(true); playbackFinished = false;
       scheduleLoop();
+      scheduleUiLoop();
     }).catch(() => {});
   }
   function pausePlayback(){
@@ -2575,13 +2576,17 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     }
     updateActiveTrackers(srcVideo.currentTime);
     drawFrame(undefined, {editing:true});
-    // 시간 표시는 DOM 갱신이 무거우므로 약 15회/초로 제한합니다.
-    const nowMs = performance.now();
-    if(nowMs - lastTimeUiAt > 66){ lastTimeUiAt = nowMs; updateTimeUI(); }
     scheduleLoop();
   }
-  let lastTimeUiAt = 0;
-  // 영상에 새 프레임이 나올 때만 그립니다. (60Hz 화면에서 24~30fps 영상을 매번 다시 그리면 같은 프레임을 중복 처리해 끊깁니다.)
+  // 영상 캔버스는 실제 새 프레임이 도착했을 때만 다시 그리고,
+  // 재생 위치 표시만 화면 주사율에 맞춰 별도 갱신해 진행바의 끊김을 줄입니다.
+  function uiPlaybackLoop(){
+    if(!playing) return;
+    updateTimeUI();
+    requestAnimationFrame(uiPlaybackLoop);
+  }
+  function scheduleUiLoop(){ requestAnimationFrame(uiPlaybackLoop); }
+  // 영상에 새 프레임이 나올 때만 편집 캔버스를 갱신합니다.
   function scheduleLoop(){
     if(typeof srcVideo.requestVideoFrameCallback === 'function') srcVideo.requestVideoFrameCallback(loop);
     else requestAnimationFrame(loop);
@@ -4479,8 +4484,11 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       recorder.start();
       if(mp4Recorder) mp4Recorder.start(1000);
       submitExportFrame();
-      for(const seg of orderedSegments()){
-        await seekTo(seg.start);
+      const renderList = orderedSegments();
+      for(let segmentIndex=0; segmentIndex<renderList.length; segmentIndex++){
+        const seg = renderList[segmentIndex];
+        // 첫 구간은 녹화기 시작 직전에 이미 seek/draw를 마쳤으므로 중복 seek를 생략합니다.
+        if(segmentIndex > 0) await seekTo(seg.start);
         resetMotion();
         drawFrame(seg.start, {editing:false});
         await new Promise(requestAnimationFrame);
@@ -4578,8 +4586,11 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       }
       recorder.start(1000);
       submitExportFrame();
-      for(const seg of orderedSegments()){
-        await seekTo(seg.start);
+      const renderList = orderedSegments();
+      for(let segmentIndex=0; segmentIndex<renderList.length; segmentIndex++){
+        const seg = renderList[segmentIndex];
+        // 첫 구간은 녹화 시작 전에 이미 seek/draw 했으므로 중복 탐색으로 인한 대기를 없앱니다.
+        if(segmentIndex > 0) await seekTo(seg.start);
         resetMotion();
         drawFrame(seg.start, {editing:false});
         await new Promise(requestAnimationFrame);
@@ -4736,6 +4747,8 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         requestAnimationFrame(step);
       }
       let lastCt = -1;
+      // 첫 프레임 디코딩을 기다리는 동안에도 렌더링 진행 상태가 멈춘 것처럼 보이지 않게 시작점을 즉시 반영합니다.
+      try{ onProgress(seg.start); }catch(_){}
       srcVideo.play().then(() => requestAnimationFrame(step)).catch(() => resolve());
     });
   }
