@@ -862,6 +862,7 @@
             <button type="button" id="convertBtn" class="btn btn-sm btn-primary" disabled>MP4로 변환</button>
           </div>
           <div class="progress" id="aviProgressWrap"><div id="aviProgressBar"></div></div>
+          <button type="button" id="aviCancelBtn" class="btn" style="margin-top:8px;display:none;">변환 취소</button>
           <div id="aviResult" class="hint" style="margin-top:8px;"></div>
           <div id="aviProtocolWarning" class="notice danger" style="margin-top:8px; display:none;">
             <svg class="ic"><use href="#ic-alert"/></svg>
@@ -1552,6 +1553,33 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     return filenameRecordedTime(file.name);
   }
 
+  // AVI 헤더의 영상 코덱 이름(FourCC, 예: H264, MJPG, DIVX)을 읽습니다. 못 읽으면 빈 문자열.
+  async function readAviVideoFourcc(file){
+    try{
+      const buf = new Uint8Array(await file.slice(0, Math.min(file.size, 1024*1024)).arrayBuffer());
+      const find = (sig, from) => {
+        outer: for(let i = from; i <= buf.length - sig.length; i++){
+          for(let k = 0; k < sig.length; k++) if(buf[i+k] !== sig.charCodeAt(k)) continue outer;
+          return i;
+        }
+        return -1;
+      };
+      const str = (i) => String.fromCharCode(buf[i], buf[i+1], buf[i+2], buf[i+3]);
+      let pos = 0;
+      while(true){
+        const strh = find('strh', pos);
+        if(strh < 0) return '';
+        if(str(strh + 8) === 'vids'){
+          const strf = find('strf', strh);
+          if(strf < 0) return '';
+          return str(strf + 8 + 16).replace(/\0/g, '').trim();   // biCompression
+        }
+        pos = strh + 4;
+      }
+    }catch(err){ return ''; }
+  }
+  const H264_FOURCC = ['H264', 'X264', 'AVC1', 'h264', 'x264', 'avc1', 'HAVC'];
+
   convertBtn.addEventListener('click', async () => {
     if(!aviFile) return;
     if(location.protocol === 'file:'){
@@ -1561,28 +1589,70 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         '<span class="hint">이 HTML을 웹서버에 올린 뒤 <code>https://</code> 주소로 접속해 주세요.</span>';
       return;
     }
+    // 2GB 이상은 메모리 부담이 커서 시작 전에 한 번 확인합니다.
+    if(aviFile.size >= 2 * 1024 * 1024 * 1024){
+      const go = await dialog({
+        title:'큰 파일입니다',
+        message:`파일 크기가 약 ${(aviFile.size / 1024 / 1024 / 1024).toFixed(1)}GB입니다. 메모리가 부족한 PC에서는 변환이 멈출 수 있습니다.\n다른 탭을 닫은 뒤 진행할까요?`,
+        confirmText:'변환 시작'
+      });
+      if(!go) return;
+    }
+
     convertBtn.disabled = true;
+    let convCancelled = false;
+    let lastProgressAt = Date.now();
     $('aviProgressWrap').classList.add('show');
+    $('aviCancelBtn').style.display = '';
     $('aviProgressBar').style.width = '0%';
     $('aviResult').textContent = '변환 엔진을 불러오는 중입니다. 최초 1회만 수십 MB를 내려받습니다.';
     setToolbarStatus('AVI → MP4 변환 중', 'busy');
+    // 진행률이 1분 넘게 바뀌지 않으면 멈춘 것으로 보고 안내합니다(자동 중단은 하지 않습니다).
+    const stallTimer = setInterval(() => {
+      if(Date.now() - lastProgressAt > 60000){
+        $('aviResult').innerHTML = `<div class="notice danger">${ico('alert')}<div>진행률이 1분 넘게 바뀌지 않아 멈춘 것 같습니다. 다른 탭을 닫아 메모리를 확보하거나, <strong>변환 취소</strong> 후 다시 시도해 주세요.</div></div>`;
+      }
+    }, 5000);
     try{
       const libs = await loadFFmpegLibs();
       const ff = await ensureFFmpegLoaded();
+      $('aviCancelBtn').onclick = () => { convCancelled = true; try{ ff.terminate(); }catch(_){} };
       ff.on('progress', ({progress}) => {
+        lastProgressAt = Date.now();
         const pct = Math.min(100, Math.max(0, progress*100));
         $('aviProgressBar').style.width = pct + '%';
       });
       $('aviResult').textContent = '변환 중입니다...';
       const inName = 'input' + (aviFile.name.match(/\.[a-zA-Z0-9]+$/) || ['.avi'])[0];
       await ff.writeFile(inName, await libs.fetchFile(aviFile));
-      await ff.exec(['-i', inName, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', 'output.mp4']);
-      // MP4의 촬영일시가 변환 시각(지금)으로 찍히지 않도록, 원본의 기록 시각으로 바꿉니다.
-      // 기록 시각을 찾지 못하면 1970년으로 두어 날짜·시간이 표시되지 않게 합니다.
+
+      // MP4의 촬영일시는 원본의 기록 시각으로 맞춥니다(변환 시각이 찍히지 않도록). 기록이 없으면 1970년으로 두어 표시하지 않습니다.
       const recordedMs = await readAviRecordedTime(aviFile);
       const creationIso = recordedMs ? new Date(recordedMs).toISOString() : '1970-01-01T00:00:00Z';
-      await ff.exec(['-i', 'output.mp4', '-c', 'copy', '-metadata', `creation_time=${creationIso}`, '-movflags', '+faststart', 'output2.mp4']);
-      const data = await ff.readFile('output2.mp4');
+      const meta = ['-metadata', `creation_time=${creationIso}`];
+
+      // 1단계: 영상은 다시 압축하지 않고 그대로 복사합니다(DVR 영상 대부분 H.264). 음성은 AAC로 가볍게 변환하고, 자막·시각 텍스트 스트림은 제외합니다.
+      const fourcc = await readAviVideoFourcc(aviFile);
+      const isH264 = H264_FOURCC.includes(fourcc);
+      let mode = 'copy';
+      let code = 1;
+      if(isH264){
+        code = await ff.exec(['-i', inName, '-map', '0:v:0', '-c:v', 'copy', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', ...meta, '-movflags', '+faststart', 'output.mp4']);
+        if(convCancelled) throw new Error('cancelled');
+      }
+      if(code !== 0){
+        // 2단계: 그대로 복사할 수 없는 코덱이면 H.264로 다시 인코딩합니다.
+        mode = 'encode';
+        try{ await ff.deleteFile('output.mp4'); }catch(_){}
+        $('aviResult').textContent = isH264
+          ? '이 영상은 그대로 복사할 수 없어 다시 압축하고 있습니다. 시간이 더 걸립니다.'
+          : `영상 코덱(${fourcc || '알 수 없음'})은 H.264가 아니어서 다시 압축하고 있습니다. 시간이 더 걸립니다.`;
+        lastProgressAt = Date.now();
+        code = await ff.exec(['-i', inName, '-map', '0:v:0', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', ...meta, '-movflags', '+faststart', 'output.mp4']);
+        if(convCancelled) throw new Error('cancelled');
+        if(code !== 0) throw new Error('영상 변환에 실패했습니다(코덱 미지원 또는 손상 가능).');
+      }
+      const data = await ff.readFile('output.mp4');
       const blob = new Blob([data.buffer], {type:'video/mp4'});
       const url = URL.createObjectURL(blob);
       const outName = (aviFile.name.replace(/\.[^.]+$/, '') || 'converted') + '.mp4';
@@ -1597,8 +1667,12 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       $('loadConvertedBtn').addEventListener('click', () => {
         loadVideoBlob(blob, {name:outName, size:blob.size, lastModified:0, type:'video/mp4'});
       });
-      toast('AVI → MP4 변환이 완료되었습니다.', {type:'success'});
+      toast(mode === 'copy' ? 'AVI → MP4 변환이 완료되었습니다. (재인코딩 없이 빠르게 처리)' : 'AVI → MP4 변환이 완료되었습니다. (재인코딩 방식)', {type:'success'});
     } catch(err){
+      if(convCancelled){
+        $('aviResult').innerHTML = '<span class="hint">변환을 취소했습니다. 필요하면 다시 시도하세요.</span>';
+        return;
+      }
       console.error(err);
       const msg = (err && (err.message || err.toString())) || '알 수 없는 오류';
       const isFileProto = location.protocol === 'file:';
@@ -1607,6 +1681,8 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
           ? '이 파일을 file:// 방식(더블클릭)으로 열고 있어 변환 엔진을 내려받지 못했을 가능성이 높습니다.'
           : '파일이 손상되었거나 지원되지 않는 코덱이거나, 네트워크(방화벽/사내망)에서 변환 엔진(cdn.jsdelivr.net) 접속이 차단되었을 수 있습니다. 다른 프로그램으로 MP4 변환 후 불러오는 방법도 있습니다.'}</span></div></div>`;
     } finally {
+      clearInterval(stallTimer);
+      $('aviCancelBtn').style.display = 'none';
       $('aviProgressWrap').classList.remove('show');
       convertBtn.disabled = false;
       setToolbarStatus();
@@ -1665,7 +1741,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const videoName = currentSourceMeta?.name || (srcVideo.dataset.sourceName || '');
     return {
       format:'cctv-editor-project',
-      version:3,
+      version:4,
       savedAt:new Date().toISOString(),
       sourceVideo:{
         name:videoName,
@@ -1697,6 +1773,11 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         days:$('pkgDays')?.value || '30',
         expireDate:$('pkgExpireDate')?.value || '',
         expireTime:$('pkgExpireTime')?.value || '23:59'
+      },
+      timestamp:{
+        enabled:!!tsEnable?.checked,
+        pos:tsPos,
+        baseMs:tsBase == null ? null : Number(tsBase)
       }
     };
   }
@@ -1753,6 +1834,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       if(!ok) return false;
     }
 
+    applyTimestampState(state.timestamp);
     regions = state.regions.map(r => normalizeProjectRegion(r,false));
     revealRegions = state.revealRegions.map(r => normalizeProjectRegion(r,true));
     completedRegionIds = new Set(Array.isArray(state.completedRegionIds) ? state.completedRegionIds : []);
@@ -5804,7 +5886,24 @@ if(document.readyState==='loading'){
   const tsNote = $('tsNote');
   let tsBase = null;   // 영상 0초에 해당하는 시각 (epoch ms, 로컬 시간 기준)
   let tsToken = 0;
-  let tsPos = 'center';   // 'left' | 'center' | 'right' (하단 기준)     // 영상이 바뀔 때마다 증가 — 늦게 끝난 이전 읽기 결과를 무시하기 위함
+  let tsPos = 'center';   // 'left' | 'center' | 'right' (하단 기준)
+  let tsFromProject = null; // 영상 로딩 중에 적용될 프로젝트 저장값
+  let tsResolving = false;
+
+  // 프로젝트 파일 또는 자동 저장본의 날짜·시간 설정을 화면에 반영합니다.
+  function applyTimestampState(ts){
+    if(!ts) return;
+    if(tsResolving) tsFromProject = ts;   // 영상 읽기가 끝난 뒤 덮어쓰이지 않도록 기억해 둡니다.
+    tsPos = ['left','center','right'].includes(ts.pos) ? ts.pos : 'center';
+    document.querySelectorAll('#tsPos button').forEach(b => b.classList.toggle('active', b.dataset.pos === tsPos));
+    tsEnable.checked = ts.enabled !== false;
+    if(ts.baseMs != null){
+      tsBase = Number(ts.baseMs);
+      tsStart.value = tsFormatInput(tsBase);
+      setTsNote('프로젝트에 저장된 촬영 시각을 사용합니다.', 'ok');
+    }
+    tsEnable.dispatchEvent(new Event('change'));   // 스위치 모양과 화면을 함께 갱신
+  }     // 영상이 바뀔 때마다 증가 — 늦게 끝난 이전 읽기 결과를 무시하기 위함
   const TS_MONO = "Consolas, 'SF Mono', Menlo, monospace";
 
   // MP4의 mvhd 상자에서 촬영(생성) 시각을 읽습니다. 1904-01-01 UTC 기준 초 단위 값입니다.
@@ -5880,12 +5979,26 @@ if(document.readyState==='loading'){
     note.className = 'field-note' + (cls ? ' ' + cls : '');
   }
 
+  // 영상이 바뀔 때 촬영 시각을 다시 읽습니다. 읽는 동안에만 프로젝트 저장값을 기억합니다.
   async function resolveTimestampBase(blob, meta){
+    tsResolving = true;
+    try{ await resolveTimestampBaseInner(blob, meta); }
+    finally{ tsResolving = false; }
+  }
+  async function resolveTimestampBaseInner(blob, meta){
     const token = ++tsToken;
     tsBase = null;
     const mp4Ms = await readMp4CreationTime(blob);
     if(token !== tsToken) return;
     const ms = mp4Ms ?? (meta && meta.name ? filenameRecordedTime(meta.name) : null);
+    if(tsFromProject && tsFromProject.baseMs != null){
+      tsBase = Number(tsFromProject.baseMs);
+      tsStart.value = tsFormatInput(tsBase);
+      setTsNote('프로젝트에 저장된 촬영 시각을 사용합니다.', 'ok');
+      tsFromProject = null;
+      drawFrame(undefined, {editing:true});
+      return;
+    }
     tsBase = ms;
     if(ms != null){
       tsStart.value = tsFormatInput(ms);
@@ -5925,10 +6038,11 @@ if(document.readyState==='loading'){
     ctx.restore();
   }
 
-  tsEnable.addEventListener('change', () => drawFrame(undefined, {editing:true}));
+  tsEnable.addEventListener('change', () => { drawFrame(undefined, {editing:true}); scheduleAutosave(); });
   document.querySelectorAll('#tsPos button').forEach(btn => {
     btn.addEventListener('click', () => {
       tsPos = btn.dataset.pos;
+      scheduleAutosave();
       document.querySelectorAll('#tsPos button').forEach(b => b.classList.toggle('active', b === btn));
       drawFrame(undefined, {editing:true});
     });
@@ -5939,6 +6053,7 @@ if(document.readyState==='loading'){
     tsBase = v;
     setTsNote('직접 입력한 시각으로 표시합니다.', 'ok');
     drawFrame(undefined, {editing:true});
+    scheduleAutosave();
   });
 
   blockPageInspection();
