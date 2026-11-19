@@ -299,11 +299,29 @@
   html[data-theme="dark"] .notice.ok{color:#6fe39a;}
   html[data-theme="dark"] .notice.warn{color:#ffc46b;}
 
-  /* 진행 막대 */
+  /* 진행 막대 (부드러운 전환) */
   .progress{height:6px; background:var(--fill); border-radius:3px; overflow:hidden; margin-top:10px; display:none;}
-  .progress > div{height:100%; width:0%; background:var(--blue); border-radius:3px; transition:width .15s linear;}
+  .progress > div{
+    height:100%; width:0%; background:var(--blue); border-radius:3px;
+    transition:width .35s cubic-bezier(.22, 1, .36, 1);
+    will-change:width;
+  }
   .progress.show{display:block;}
   .progress-label{display:flex; justify-content:space-between; font-size:11.5px; color:var(--text-2); margin-top:6px; font-variant-numeric:tabular-nums;}
+
+  /* 렌더링 중 타임라인 스무딩 & 캔버스 깜빡임 방지 오버레이 */
+  .is-exporting .playhead,
+  .is-exporting .seek-thumb{transition:left .32s linear;}
+  .render-shield{
+    position:absolute; inset:0; z-index:10;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;
+    background:rgba(11,11,13,.72); color:#f5f5f7;
+    -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+    font-size:13.5px; font-weight:500; pointer-events:none;
+    opacity:0; transition:opacity .25s var(--ease);
+  }
+  .stage-wrap.is-exporting .render-shield{opacity:1;}
+  .render-shield small{font-size:12px; color:#aeaeb2;}
 
   /* 칩 */
   .chip{display:inline-flex; align-items:center; gap:4px; height:20px; padding:0 8px; border-radius:10px; background:var(--fill); color:var(--text-2); font-size:11px; font-weight:600; white-space:nowrap;}
@@ -782,6 +800,10 @@
         <div class="empty-hint" id="emptyHint" hidden></div>
         <div class="stage-chip" id="stageChip" hidden></div>
         <div class="stage-chip auto" id="autoChip" hidden></div>
+        <div class="render-shield" id="renderShield" hidden>
+          <span>고속 렌더링 진행 중...</span>
+          <small>눈의 피로를 줄이기 위해 고속 재생 화면을 잠시 가렸습니다.</small>
+        </div>
       </div>
       <video id="srcVideo" hidden playsinline muted></video>
       <input type="file" id="fileInput" accept="video/mp4,.mp4,video/*" hidden>
@@ -944,7 +966,7 @@
     <!-- 3. 렌더링 -->
     <div class="card">
       <div class="card-head tight">
-        <div class="card-title"><span class="step-badge">3</span><div><h2>렌더링</h2><p class="card-sub">남긴 구간만 모자이크를 입혀 영상 파일로 만듭니다. 실제 재생 시간만큼 걸립니다.</p></div></div>
+        <div class="card-title"><span class="step-badge">3</span><div><h2>렌더링</h2><p class="card-sub">남긴 구간만 모자이크를 입혀 MP4 영상 파일로 고속 렌더링합니다. (미지원 환경에서는 실시간 녹화로 자동 전환)</p></div></div>
       </div>
       <div class="summary-grid">
         <div class="summary-item"><div class="k">남는 길이</div><div class="v" id="sumKept">—</div></div>
@@ -1637,7 +1659,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       let mode = 'copy';
       let code = 1;
       if(isH264){
-        code = await ff.exec(['-i', inName, '-map', '0:v:0', '-c:v', 'copy', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', ...meta, '-movflags', '+faststart', 'output.mp4']);
+        code = await ff.exec(['-fflags', '+genpts', '-i', inName, '-map', '0:v:0', '-c:v', 'copy', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', '-sn', '-dn', '-avoid_negative_ts', 'make_zero', ...meta, '-movflags', '+faststart', 'output.mp4']);
         if(convCancelled) throw new Error('cancelled');
       }
       if(code !== 0){
@@ -1648,7 +1670,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
           ? '이 영상은 그대로 복사할 수 없어 다시 압축하고 있습니다. 시간이 더 걸립니다.'
           : `영상 코덱(${fourcc || '알 수 없음'})은 H.264가 아니어서 다시 압축하고 있습니다. 시간이 더 걸립니다.`;
         lastProgressAt = Date.now();
-        code = await ff.exec(['-i', inName, '-map', '0:v:0', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', ...meta, '-movflags', '+faststart', 'output.mp4']);
+        code = await ff.exec(['-i', inName, '-map', '0:v:0', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'fastdecode', '-crf', '26', '-pix_fmt', 'yuv420p', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '128k', '-sn', '-dn', ...meta, '-movflags', '+faststart', 'output.mp4']);
         if(convCancelled) throw new Error('cancelled');
         if(code !== 0) throw new Error('영상 변환에 실패했습니다(코덱 미지원 또는 손상 가능).');
       }
@@ -2498,7 +2520,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     }
     srcVideo.play().then(() => {
       setPlaying(true); playbackFinished = false;
-      requestAnimationFrame(loop);
+      scheduleLoop();
     }).catch(() => {});
   }
   function pausePlayback(){
@@ -2575,8 +2597,16 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     }
     updateActiveTrackers(srcVideo.currentTime);
     drawFrame(undefined, {editing:true});
-    updateTimeUI();
-    requestAnimationFrame(loop);
+    // 시간 표시는 DOM 갱신이 무거우므로 약 15회/초로 제한합니다.
+    const nowMs = performance.now();
+    if(nowMs - lastTimeUiAt > 66){ lastTimeUiAt = nowMs; updateTimeUI(); }
+    scheduleLoop();
+  }
+  let lastTimeUiAt = 0;
+  // 영상에 새 프레임이 나올 때만 그립니다. (60Hz 화면에서 24~30fps 영상을 매번 다시 그리면 같은 프레임을 중복 처리해 끊깁니다.)
+  function scheduleLoop(){
+    if(typeof srcVideo.requestVideoFrameCallback === 'function') srcVideo.requestVideoFrameCallback(loop);
+    else requestAnimationFrame(loop);
   }
 
   // 재생 진행바는 남아 있는 구간만 표시합니다. 삭제 구간은 빈 공간으로 남습니다.
@@ -2838,6 +2868,9 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     return kfs[kfs.length-1];
   }
 
+  // 고속 렌더링(WebCodecs) 시 디코딩된 VideoFrame을 그리기 위한 현재 프레임 소스 (평소에는 null -> srcVideo 사용)
+  let activeFrameSource = null;
+
   // 모자이크. 농도 슬라이더는 픽셀화된 영상과 원본을 섞는 비율입니다.
   function applyGlassMosaic(rect, shape){
     const {x,y,w,h,block} = rect;
@@ -2845,7 +2878,10 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const bs = Math.max(2, block);
     const bw = Math.max(1, Math.round(w/bs));
     const bh = Math.max(1, Math.round(h/bs));
-    tempCanvas.width = bw; tempCanvas.height = bh;
+    // 캔버스 크기를 매 프레임 바꾸면 메모리를 다시 할당해 끊김이 생기므로, 커질 때만 키우고 일부 영역만 씁니다.
+    if(tempCanvas.width < bw) tempCanvas.width = bw;
+    if(tempCanvas.height < bh) tempCanvas.height = bh;
+    tempCtx.clearRect(0, 0, bw, bh);
     tempCtx.imageSmoothingEnabled = true;
     tempCtx.drawImage(stage, x, y, w, h, 0, 0, bw, bh);
     ctx.save();
@@ -2857,8 +2893,14 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const opacity = Number(mosaicOpacity.value) / 100;
     ctx.globalAlpha = opacity;
     ctx.drawImage(tempCanvas, 0,0,bw,bh, x,y,w,h);
-    ctx.globalAlpha = 1 - opacity;
-    ctx.drawImage(srcVideo, 0, 0, stage.width, stage.height);
+    if(opacity < 0.999){
+      // 영역 부분만 원본에서 잘라 그립니다(화면 전체를 영역마다 다시 그리지 않음).
+      ctx.globalAlpha = 1 - opacity;
+      const frameSrc = activeFrameSource || srcVideo;
+      const vw = frameSrc.displayWidth || frameSrc.videoWidth || stage.width, vh = frameSrc.displayHeight || frameSrc.videoHeight || stage.height;
+      const kx = vw / stage.width, ky = vh / stage.height;
+      ctx.drawImage(frameSrc, x*kx, y*ky, w*kx, h*ky, x, y, w, h);
+    }
     ctx.globalAlpha = 1;
     ctx.restore();
   }
@@ -2870,7 +2912,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     if(shape === 'ellipse') ctx.ellipse(x+w/2, y+h/2, w/2, h/2, 0, 0, Math.PI*2);
     else ctx.rect(x,y,w,h);
     ctx.clip();
-    ctx.drawImage(srcVideo, 0, 0, stage.width, stage.height);
+    ctx.drawImage(activeFrameSource || srcVideo, 0, 0, stage.width, stage.height);
     ctx.restore();
   }
 
@@ -2891,12 +2933,13 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
 
   function drawFrame(atTime, opts){
     if(!duration) return;
-    if(srcVideo.readyState < 2) return;
+    const frameSrc = activeFrameSource || srcVideo;
+    if(!activeFrameSource && srcVideo.readyState < 2) return;
     const editing = opts && opts.editing;
     if(editing){ overlayK = overlayScale(); labelHits = []; }
     const t = atTime !== undefined ? atTime : srcVideo.currentTime;
     try{
-      ctx.drawImage(srcVideo, 0, 0, stage.width, stage.height);
+      ctx.drawImage(frameSrc, 0, 0, stage.width, stage.height);
     } catch(err){
       console.warn('video frame is not ready yet', err);
       return;
@@ -3132,8 +3175,9 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const cols = motion.cols;
     const rows = Math.max(32, Math.round(cols * stage.height / stage.width));
     motion.rows = rows;
-    motionCanvas.width = cols; motionCanvas.height = rows;
-    motionCtx.drawImage(srcVideo, 0, 0, cols, rows);
+    if(motionCanvas.width !== cols) motionCanvas.width = cols;
+    if(motionCanvas.height !== rows) motionCanvas.height = rows;
+    motionCtx.drawImage(activeFrameSource || srcVideo, 0, 0, cols, rows);
     const px = motionCtx.getImageData(0, 0, cols, rows).data;
     const n = cols * rows;
     const cur = new Float32Array(n);
@@ -3453,9 +3497,11 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
   function makeTrackingTemplate(region,t){
     const rect=getRectAtTime(region,t);
     if(!rect || rect.w<12 || rect.h<12) return null;
-    trackCanvas.width=stage.width; trackCanvas.height=stage.height;
+    if(trackCanvas.width!==stage.width) trackCanvas.width=stage.width;
+    if(trackCanvas.height!==stage.height) trackCanvas.height=stage.height;
     trackCtx.drawImage(srcVideo,0,0,stage.width,stage.height);
     const frame=trackCtx.getImageData(0,0,stage.width,stage.height).data;
+    trackFrameCache={t:-1,data:null};
     const patches=PATCH_POINTS.map(([rx,ry,rw,rh])=>samplePatch(frame,stage.width,stage.height, rect.x+rect.w*rx,rect.y+rect.h*ry,rect.w*rw,rect.h*rh));
     return {patches,w:rect.w,h:rect.h,rect:{...rect},lastT:t};
   }
@@ -3465,6 +3511,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     for(let i=0;i<p.vals.length;i++) dot+=p.vals[i]*patch.vals[i];
     return dot;
   }
+  let trackFrameCache = {t:-1, data:null};
   function trackRegionAtTime(region,t){
     const tr=region.tracking;
     if(!tr || !tr.active || !duration) return;
@@ -3472,9 +3519,16 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     const prev=tr.lastRect || getRectAtTime(region,tr.lastT);
     if(!prev) return;
     try{
-      trackCanvas.width=stage.width; trackCanvas.height=stage.height;
-      trackCtx.drawImage(srcVideo,0,0,stage.width,stage.height);
-      const frame=trackCtx.getImageData(0,0,stage.width,stage.height).data;
+      // 같은 시점에 영역이 여러 개여도 프레임은 한 번만 읽습니다(전체 해상도 getImageData는 매우 무겁습니다).
+      let frame;
+      if(trackFrameCache.t===t && trackFrameCache.data){ frame=trackFrameCache.data; }
+      else{
+        if(trackCanvas.width!==stage.width) trackCanvas.width=stage.width;
+        if(trackCanvas.height!==stage.height) trackCanvas.height=stage.height;
+        trackCtx.drawImage(activeFrameSource || srcVideo,0,0,stage.width,stage.height);
+        frame=trackCtx.getImageData(0,0,stage.width,stage.height).data;
+        trackFrameCache={t,data:frame};
+      }
       const maxDim=Math.max(prev.w,prev.h);
       const speed=Math.min(1.8,Math.max(0.7,(t-tr.lastT)/0.06));
       const radius=Math.max(35,Math.min(220,maxDim*0.95*speed));
@@ -4375,24 +4429,743 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
   // =====================================================================
   // 렌더링 (남긴 구간을 WebM으로 녹화, 편집용 표시선은 포함되지 않음)
   // =====================================================================
+  let exportCancelRequested = false;
+  let lastProgressPct = 0;
+
   function setExportProgress(pct, text){
     progressWrap.classList.add('show');
     progressLabel.hidden = false;
-    progressBar.style.width = clampNum(pct, 0, 100) + '%';
-    $('progressPct').textContent = `${Math.round(clampNum(pct, 0, 100))}%`;
+    const clamped = clampNum(pct, 0, 100);
+    // 뒤로 튀지 않도록 단조 증가 보정 (0으로 초기화할 때만 허용)
+    lastProgressPct = clamped === 0 ? 0 : Math.max(lastProgressPct, clamped);
+    progressBar.style.width = lastProgressPct.toFixed(1) + '%';
+    $('progressPct').textContent = `${Math.round(lastProgressPct)}%`;
     if(text) $('progressText').textContent = text;
   }
-  function hideExportProgress(){ progressWrap.classList.remove('show'); progressLabel.hidden = true; }
+  function hideExportProgress(){
+    progressWrap.classList.remove('show');
+    progressLabel.hidden = true;
+    lastProgressPct = 0;
+    progressBar.style.width = '0%';
+  }
+  function setExportingUI(active){
+    const shield = $('renderShield');
+    document.body.classList.toggle('is-exporting', active);
+    stageWrap.classList.toggle('is-exporting', active);
+    if(shield) shield.hidden = !active;
+    if(active){
+      exportBtn.disabled = false; // 취소 클릭이 가능하도록 활성 유지
+      exportBtn.classList.remove('btn-primary');
+      exportBtn.classList.add('btn-danger');
+      exportBtn.innerHTML = `${ico('xmark')} 렌더링 취소`;
+    } else {
+      exportBtn.classList.remove('btn-danger');
+      exportBtn.classList.add('btn-primary');
+      exportBtn.innerHTML = `${ico('export')} 선택 구간 렌더링 시작`;
+      exportBtn.disabled = !duration || !segments.length;
+    }
+  }
+
+  // =====================================================================
+  // WebCodecs 오프라인 고속 렌더링 엔진 (내장 MP4 디먹서 + MP4 먹서)
+  //  - 외부 CDN/ffmpeg 없이 브라우저 하드웨어 가속(VideoDecoder/VideoEncoder)으로
+  //    실시간(1x) 제한 없이 빠르게 H.264 MP4(faststart)를 직접 생성합니다.
+  //  - 미지원 브라우저나 비표준 입력 파일에서는 기존 MediaRecorder로 자동 전환됩니다.
+  // =====================================================================
+  function wcHex2(n){ return (n & 0xFF).toString(16).padStart(2, '0'); }
+  function wcParseHevcCodec(hvcc){
+    if(!hvcc || hvcc.length < 13) return 'hvc1.1.6.L93.B0';
+    const b1 = hvcc[1];
+    const profileSpace = (b1 >> 6) & 3;
+    const tierFlag = (b1 >> 5) & 1;
+    const profileIdc = b1 & 0x1F;
+    const spaceChar = ['', 'A', 'B', 'C'][profileSpace] || '';
+    const compat = ((hvcc[2]<<24)|(hvcc[3]<<16)|(hvcc[4]<<8)|hvcc[5]) >>> 0;
+    let rev = 0;
+    for(let i=0; i<32; i++) if(compat & (1 << i)) rev |= (1 << (31 - i));
+    const levelIdc = hvcc[12];
+    const cbytes = [];
+    for(let i=6; i<12; i++) cbytes.push(hvcc[i]);
+    while(cbytes.length > 1 && cbytes[cbytes.length-1] === 0) cbytes.pop();
+    const cstr = cbytes.map(v => v.toString(16).toUpperCase()).join('.');
+    return `hvc1.${spaceChar}${profileIdc}.${(rev >>> 0).toString(16).toUpperCase()}.${tierFlag ? 'H' : 'L'}${levelIdc}.${cstr}`;
+  }
+
+  async function parseMp4VideoTrack(blob){
+    if(!blob || blob.size < 64) return null;
+    const size = blob.size;
+    let off = 0, moovBuf = null;
+    while(off + 8 <= size){
+      const head = new DataView(await blob.slice(off, Math.min(size, off + 16)).arrayBuffer());
+      let boxSize = head.getUint32(0), hdr = 8;
+      if(boxSize === 1){ boxSize = Number(head.getBigUint64(8)); hdr = 16; }
+      else if(boxSize === 0){ boxSize = size - off; }
+      if(boxSize < hdr || off + boxSize > size) break;
+      const type = String.fromCharCode(head.getUint8(4), head.getUint8(5), head.getUint8(6), head.getUint8(7));
+      if(type === 'moov'){
+        moovBuf = await blob.slice(off + hdr, off + boxSize).arrayBuffer();
+        break;
+      }
+      off += boxSize;
+    }
+    if(!moovBuf) return null;
+    const moovBytes = new Uint8Array(moovBuf);
+    const dv = new DataView(moovBuf);
+    const listBoxes = (start, end) => {
+      const out = [];
+      let p = start;
+      while(p + 8 <= end){
+        let sz = dv.getUint32(p), h = 8;
+        if(sz === 1){ sz = Number(dv.getBigUint64(p + 8)); h = 16; }
+        else if(sz === 0){ sz = end - p; }
+        if(sz < h || p + sz > end) break;
+        const t = String.fromCharCode(dv.getUint8(p+4), dv.getUint8(p+5), dv.getUint8(p+6), dv.getUint8(p+7));
+        out.push({ type: t, start: p, body: p + h, end: p + sz });
+        p += sz;
+      }
+      return out;
+    };
+    const moovKids = listBoxes(0, dv.byteLength);
+    let movieTimescale = 1000;
+    const mvhd = moovKids.find(b => b.type === 'mvhd');
+    if(mvhd){
+      const v = dv.getUint8(mvhd.body);
+      movieTimescale = v === 1 ? dv.getUint32(mvhd.body + 20) : dv.getUint32(mvhd.body + 12);
+    }
+    for(const trak of moovKids.filter(b => b.type === 'trak')){
+      const trakKids = listBoxes(trak.body, trak.end);
+      const mdia = trakKids.find(b => b.type === 'mdia');
+      if(!mdia) continue;
+      const mdiaKids = listBoxes(mdia.body, mdia.end);
+      const hdlr = mdiaKids.find(b => b.type === 'hdlr');
+      if(!hdlr) continue;
+      const htype = String.fromCharCode(dv.getUint8(hdlr.body+8), dv.getUint8(hdlr.body+9), dv.getUint8(hdlr.body+10), dv.getUint8(hdlr.body+11));
+      if(htype !== 'vide') continue;
+
+      const mdhd = mdiaKids.find(b => b.type === 'mdhd');
+      const minf = mdiaKids.find(b => b.type === 'minf');
+      if(!mdhd || !minf) continue;
+      const mdhdVer = dv.getUint8(mdhd.body);
+      const timescale = mdhdVer === 1 ? dv.getUint32(mdhd.body + 20) : dv.getUint32(mdhd.body + 12);
+      if(!timescale) continue;
+
+      const stbl = listBoxes(minf.body, minf.end).find(b => b.type === 'stbl');
+      if(!stbl) continue;
+      const stblKids = listBoxes(stbl.body, stbl.end);
+      const stsd = stblKids.find(b => b.type === 'stsd');
+      const stts = stblKids.find(b => b.type === 'stts');
+      const stsc = stblKids.find(b => b.type === 'stsc');
+      const stsz = stblKids.find(b => b.type === 'stsz');
+      const stco = stblKids.find(b => b.type === 'stco');
+      const co64 = stblKids.find(b => b.type === 'co64');
+      if(!stsd || !stts || !stsc || !stsz || (!stco && !co64)) continue;
+
+      // stsd: codec & description
+      const entries = listBoxes(stsd.body + 8, stsd.end);
+      const entry = entries[0];
+      if(!entry) continue;
+      const width = dv.getUint16(entry.body + 24);
+      const height = dv.getUint16(entry.body + 26);
+      const cfgBoxes = listBoxes(entry.body + 78, entry.end);
+      let codec = '', description = null;
+      if(entry.type === 'avc1' || entry.type === 'avc3'){
+        const avcc = cfgBoxes.find(b => b.type === 'avcC');
+        if(!avcc) continue;
+        description = moovBytes.slice(avcc.body, avcc.end);
+        codec = `${entry.type}.${wcHex2(description[1])}${wcHex2(description[2])}${wcHex2(description[3])}`;
+      } else if(entry.type === 'hvc1' || entry.type === 'hev1'){
+        const hvcc = cfgBoxes.find(b => b.type === 'hvcC');
+        if(!hvcc) continue;
+        description = moovBytes.slice(hvcc.body, hvcc.end);
+        codec = wcParseHevcCodec(description);
+      } else {
+        continue;
+      }
+
+      // stsz
+      const uniformSize = dv.getUint32(stsz.body + 4);
+      const sampleCount = dv.getUint32(stsz.body + 8);
+      if(!sampleCount) continue;
+      const sizes = new Uint32Array(sampleCount);
+      if(uniformSize > 0){ sizes.fill(uniformSize); }
+      else {
+        for(let i=0; i<sampleCount; i++) sizes[i] = dv.getUint32(stsz.body + 12 + i*4);
+      }
+
+      // stco / co64
+      const chunkBox = stco || co64;
+      const chunkCount = dv.getUint32(chunkBox.body + 4);
+      const chunkOffsets = new Float64Array(chunkCount);
+      if(stco){
+        for(let i=0; i<chunkCount; i++) chunkOffsets[i] = dv.getUint32(chunkBox.body + 8 + i*4);
+      } else {
+        for(let i=0; i<chunkCount; i++) chunkOffsets[i] = Number(dv.getBigUint64(chunkBox.body + 8 + i*8));
+      }
+
+      // stsc -> sample offsets
+      const stscCount = dv.getUint32(stsc.body + 4);
+      const stscRows = [];
+      for(let i=0; i<stscCount; i++){
+        const p = stsc.body + 8 + i*12;
+        stscRows.push({ firstChunk: dv.getUint32(p), spc: dv.getUint32(p + 4) });
+      }
+      const offsets = new Float64Array(sampleCount);
+      let sIdx = 0;
+      for(let r=0; r<stscRows.length && sIdx < sampleCount; r++){
+        const first = stscRows[r].firstChunk;
+        const last = r + 1 < stscRows.length ? stscRows[r + 1].firstChunk - 1 : chunkCount;
+        const spc = stscRows[r].spc;
+        for(let c=first; c<=last && sIdx < sampleCount; c++){
+          let curOff = chunkOffsets[c - 1];
+          for(let k=0; k<spc && sIdx < sampleCount; k++){
+            offsets[sIdx] = curOff;
+            curOff += sizes[sIdx];
+            sIdx++;
+          }
+        }
+      }
+
+      // stts -> dts & durations
+      const dtsArr = new Float64Array(sampleCount);
+      const durArr = new Uint32Array(sampleCount);
+      const sttsCount = dv.getUint32(stts.body + 4);
+      let curDts = 0, ti = 0;
+      for(let i=0; i<sttsCount && ti < sampleCount; i++){
+        const cnt = dv.getUint32(stts.body + 8 + i*8);
+        const delta = dv.getUint32(stts.body + 12 + i*8);
+        for(let k=0; k<cnt && ti < sampleCount; k++){
+          dtsArr[ti] = curDts;
+          durArr[ti] = delta;
+          curDts += delta;
+          ti++;
+        }
+      }
+
+      // ctts (optional) -> pts
+      const ptsArr = new Float64Array(sampleCount);
+      const ctts = stblKids.find(b => b.type === 'ctts');
+      if(ctts){
+        const cVer = dv.getUint8(ctts.body);
+        const cCnt = dv.getUint32(ctts.body + 4);
+        let ci = 0;
+        for(let i=0; i<cCnt && ci < sampleCount; i++){
+          const cnt = dv.getUint32(ctts.body + 8 + i*8);
+          const offVal = cVer === 1 ? dv.getInt32(ctts.body + 12 + i*8) : dv.getUint32(ctts.body + 12 + i*8);
+          for(let k=0; k<cnt && ci < sampleCount; k++){
+            ptsArr[ci] = dtsArr[ci] + offVal;
+            ci++;
+          }
+        }
+        while(ci < sampleCount){ ptsArr[ci] = dtsArr[ci]; ci++; }
+      } else {
+        ptsArr.set(dtsArr);
+      }
+
+      // elst (optional) -> align PTS with <video>.currentTime
+      let ptsBase = ptsArr[0];
+      for(let i=1; i<Math.min(sampleCount, 32); i++) if(ptsArr[i] < ptsBase) ptsBase = ptsArr[i];
+      const edts = trakKids.find(b => b.type === 'edts');
+      if(edts){
+        const elst = listBoxes(edts.body, edts.end).find(b => b.type === 'elst');
+        if(elst){
+          const eVer = dv.getUint8(elst.body);
+          const eCnt = dv.getUint32(elst.body + 4);
+          let delayTicks = 0;
+          for(let i=0; i<eCnt; i++){
+            const p = elst.body + 8 + i * (eVer === 1 ? 20 : 12);
+            const segDur = eVer === 1 ? Number(dv.getBigUint64(p)) : dv.getUint32(p);
+            const mediaTime = eVer === 1 ? Number(dv.getBigInt64(p + 8)) : dv.getInt32(p + 4);
+            if(mediaTime === -1){ delayTicks += Math.round(segDur * timescale / (movieTimescale || 1000)); }
+            else { ptsBase = mediaTime - delayTicks; break; }
+          }
+        }
+      }
+
+      // stss -> keyframe flags
+      const isKey = new Uint8Array(sampleCount);
+      const stss = stblKids.find(b => b.type === 'stss');
+      if(stss){
+        const kCnt = dv.getUint32(stss.body + 4);
+        for(let i=0; i<kCnt; i++){
+          const idx1 = dv.getUint32(stss.body + 8 + i*4) - 1;
+          if(idx1 >= 0 && idx1 < sampleCount) isKey[idx1] = 1;
+        }
+      } else {
+        isKey.fill(1);
+      }
+      isKey[0] = 1;
+
+      const avgDurSec = sampleCount > 0 ? (curDts / sampleCount) / timescale : (1 / 30);
+      const fps = avgDurSec > 0 ? clampNum(Math.round(1 / avgDurSec), 1, 60) : 30;
+      return { codec, description, width, height, timescale, sampleCount, sizes, offsets, dtsArr, ptsArr, durArr, isKey, ptsBase, fps };
+    }
+    return null;
+  }
+
+  // ISO BMFF(MP4) faststart 먹서 (H.264 비디오 전용, 외부 라이브러리 없음)
+  class FastMp4Muxer {
+    constructor(width, height){
+      this.width = width;
+      this.height = height;
+      this.timescale = 90000;
+      this.avcC = null;
+      this.chunks = [];
+    }
+    addChunk(chunk, meta){
+      if(!this.avcC && meta && meta.decoderConfig && meta.decoderConfig.description){
+        const d = meta.decoderConfig.description;
+        this.avcC = d instanceof Uint8Array ? d.slice() : new Uint8Array(d);
+      }
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      this.chunks.push({
+        data,
+        timestampUs: chunk.timestamp,
+        durationUs: chunk.duration || 0,
+        isKey: chunk.type === 'key'
+      });
+    }
+    static box(type, ...parts){
+      let len = 8;
+      for(const p of parts) len += p.byteLength;
+      const out = new Uint8Array(len);
+      const dv = new DataView(out.buffer);
+      dv.setUint32(0, len);
+      for(let i=0; i<4; i++) out[4+i] = type.charCodeAt(i);
+      let pos = 8;
+      for(const p of parts){ out.set(p, pos); pos += p.byteLength; }
+      return out;
+    }
+    static fullBox(type, ver, flags, ...parts){
+      const hdr = new Uint8Array(4);
+      hdr[0] = ver & 0xFF;
+      hdr[1] = (flags >> 16) & 0xFF;
+      hdr[2] = (flags >> 8) & 0xFF;
+      hdr[3] = flags & 0xFF;
+      return FastMp4Muxer.box(type, hdr, ...parts);
+    }
+    static u32Arr(arr){
+      const out = new Uint8Array(arr.length * 4);
+      const dv = new DataView(out.buffer);
+      for(let i=0; i<arr.length; i++) dv.setUint32(i*4, arr[i] >>> 0);
+      return out;
+    }
+    static ascii(str){
+      const out = new Uint8Array(str.length);
+      for(let i=0; i<str.length; i++) out[i] = str.charCodeAt(i);
+      return out;
+    }
+    finalize(){
+      if(!this.chunks.length || !this.avcC) throw new Error('인코딩된 영상 데이터가 없습니다.');
+      const N = this.chunks.length;
+      const ts = this.timescale;
+      const durs = new Uint32Array(N);
+      let totalTicks = 0;
+      for(let i=0; i<N; i++){
+        let durUs = 0;
+        if(i + 1 < N) durUs = Math.max(1000, this.chunks[i+1].timestampUs - this.chunks[i].timestampUs);
+        else durUs = this.chunks[i].durationUs > 0 ? this.chunks[i].durationUs : (i > 0 ? Math.max(1000, this.chunks[i].timestampUs - this.chunks[i-1].timestampUs) : 33333);
+        const ticks = Math.max(1, Math.round(durUs * ts / 1e6));
+        durs[i] = ticks;
+        totalTicks += ticks;
+      }
+
+      // ftyp
+      const ftyp = FastMp4Muxer.box('ftyp',
+        FastMp4Muxer.ascii('isom'),
+        FastMp4Muxer.u32Arr([0x00000200]),
+        FastMp4Muxer.ascii('isomiso2avc1mp41')
+      );
+
+      // mvhd (version 0)
+      const mvhdBody = new Uint8Array(96);
+      const mvhdDv = new DataView(mvhdBody.buffer);
+      mvhdDv.setUint32(8, ts);
+      mvhdDv.setUint32(12, totalTicks >>> 0);
+      mvhdDv.setUint32(16, 0x00010000); // rate 1.0
+      mvhdDv.setUint16(20, 0x0100);     // volume 1.0
+      mvhdDv.setUint32(32, 0x00010000); // matrix
+      mvhdDv.setUint32(48, 0x00010000);
+      mvhdDv.setUint32(64, 0x40000000);
+      mvhdDv.setUint32(92, 2);          // next_track_ID
+      const mvhd = FastMp4Muxer.fullBox('mvhd', 0, 0, mvhdBody);
+
+      // tkhd (version 0, flags=3)
+      const tkhdBody = new Uint8Array(80);
+      const tkhdDv = new DataView(tkhdBody.buffer);
+      tkhdDv.setUint32(8, 1);           // track_ID
+      tkhdDv.setUint32(16, totalTicks >>> 0);
+      tkhdDv.setUint32(36, 0x00010000); // matrix
+      tkhdDv.setUint32(52, 0x00010000);
+      tkhdDv.setUint32(68, 0x40000000);
+      tkhdDv.setUint32(72, (this.width << 16) >>> 0);
+      tkhdDv.setUint32(76, (this.height << 16) >>> 0);
+      const tkhd = FastMp4Muxer.fullBox('tkhd', 0, 3, tkhdBody);
+
+      // mdhd (version 0)
+      const mdhdBody = new Uint8Array(20);
+      const mdhdDv = new DataView(mdhdBody.buffer);
+      mdhdDv.setUint32(8, ts);
+      mdhdDv.setUint32(12, totalTicks >>> 0);
+      mdhdDv.setUint16(16, 0x55C4);     // language 'und'
+      const mdhd = FastMp4Muxer.fullBox('mdhd', 0, 0, mdhdBody);
+
+      // hdlr
+      const hdlr = FastMp4Muxer.fullBox('hdlr', 0, 0,
+        new Uint8Array(4),
+        FastMp4Muxer.ascii('vide'),
+        new Uint8Array(12),
+        FastMp4Muxer.ascii('VideoHandler ')
+      );
+
+      // vmhd
+      const vmhd = FastMp4Muxer.fullBox('vmhd', 0, 1, new Uint8Array(8));
+
+      // dinf -> dref -> url
+      const urlBox = FastMp4Muxer.fullBox('url ', 0, 1);
+      const dref = FastMp4Muxer.fullBox('dref', 0, 0, FastMp4Muxer.u32Arr([1]), urlBox);
+      const dinf = FastMp4Muxer.box('dinf', dref);
+
+      // stsd -> avc1 -> avcC
+      const avc1Head = new Uint8Array(78);
+      const avc1Dv = new DataView(avc1Head.buffer);
+      avc1Dv.setUint16(6, 1);           // data_reference_index
+      avc1Dv.setUint16(24, this.width);
+      avc1Dv.setUint16(26, this.height);
+      avc1Dv.setUint32(28, 0x00480000); // 72 dpi
+      avc1Dv.setUint32(32, 0x00480000);
+      avc1Dv.setUint16(40, 1);          // frame_count
+      avc1Dv.setUint16(74, 0x0018);     // depth 24
+      avc1Dv.setInt16(76, -1);
+      const avcCBox = FastMp4Muxer.box('avcC', this.avcC);
+      const avc1 = FastMp4Muxer.box('avc1', avc1Head, avcCBox);
+      const stsd = FastMp4Muxer.fullBox('stsd', 0, 0, FastMp4Muxer.u32Arr([1]), avc1);
+
+      // stts (run-length encoded)
+      const sttsEntries = [];
+      for(let i=0; i<N; ){
+        const d = durs[i];
+        let cnt = 1;
+        while(i + cnt < N && durs[i + cnt] === d) cnt++;
+        sttsEntries.push(cnt, d);
+        i += cnt;
+      }
+      const stts = FastMp4Muxer.fullBox('stts', 0, 0, FastMp4Muxer.u32Arr([sttsEntries.length / 2, ...sttsEntries]));
+
+      // stss (keyframes, 1-based)
+      const keyIndices = [];
+      for(let i=0; i<N; i++) if(this.chunks[i].isKey) keyIndices.push(i + 1);
+      const stss = FastMp4Muxer.fullBox('stss', 0, 0, FastMp4Muxer.u32Arr([keyIndices.length, ...keyIndices]));
+
+      // stsc (1 chunk per sample)
+      const stsc = FastMp4Muxer.fullBox('stsc', 0, 0, FastMp4Muxer.u32Arr([1, 1, 1, 1]));
+
+      // stsz
+      const stszArr = new Uint32Array(2 + N);
+      stszArr[0] = 0;
+      stszArr[1] = N;
+      let mdatPayload = 0;
+      for(let i=0; i<N; i++){
+        const sz = this.chunks[i].data.byteLength;
+        stszArr[2 + i] = sz;
+        mdatPayload += sz;
+      }
+      const stszBytes = new Uint8Array(stszArr.length * 4);
+      const stszDv = new DataView(stszBytes.buffer);
+      for(let i=0; i<stszArr.length; i++) stszDv.setUint32(i*4, stszArr[i]);
+      const stsz = FastMp4Muxer.fullBox('stsz', 0, 0, stszBytes);
+
+      // stco vs co64
+      const use64 = (ftyp.byteLength + 1024 + N * 12 + mdatPayload) > 0xFFFFFFFF;
+      const buildMoov = (mdatDataOffset) => {
+        let coBox;
+        if(use64){
+          const coBuf = new Uint8Array(4 + N * 8);
+          const coDv = new DataView(coBuf.buffer);
+          coDv.setUint32(0, N);
+          let cur = mdatDataOffset;
+          for(let i=0; i<N; i++){
+            coDv.setBigUint64(4 + i*8, BigInt(cur));
+            cur += this.chunks[i].data.byteLength;
+          }
+          coBox = FastMp4Muxer.fullBox('co64', 0, 0, coBuf);
+        } else {
+          const coBuf = new Uint8Array(4 + N * 4);
+          const coDv = new DataView(coBuf.buffer);
+          coDv.setUint32(0, N);
+          let cur = mdatDataOffset;
+          for(let i=0; i<N; i++){
+            coDv.setUint32(4 + i*4, cur >>> 0);
+            cur += this.chunks[i].data.byteLength;
+          }
+          coBox = FastMp4Muxer.fullBox('stco', 0, 0, coBuf);
+        }
+        const stbl = FastMp4Muxer.box('stbl', stsd, stts, stss, stsc, stsz, coBox);
+        const minf = FastMp4Muxer.box('minf', vmhd, dinf, stbl);
+        const mdia = FastMp4Muxer.box('mdia', mdhd, hdlr, minf);
+        const trak = FastMp4Muxer.box('trak', tkhd, mdia);
+        return FastMp4Muxer.box('moov', mvhd, trak);
+      };
+
+      const dummyMoov = buildMoov(0);
+      const mdatHdrSize = (mdatPayload + 8 > 0xFFFFFFFF) ? 16 : 8;
+      const mdatDataOffset = ftyp.byteLength + dummyMoov.byteLength + mdatHdrSize;
+      const moov = buildMoov(mdatDataOffset);
+
+      const mdatHdr = new Uint8Array(mdatHdrSize);
+      const mdatDv = new DataView(mdatHdr.buffer);
+      if(mdatHdrSize === 16){
+        mdatDv.setUint32(0, 1);
+        for(let i=0; i<4; i++) mdatHdr[4+i] = 'mdat'.charCodeAt(i);
+        mdatDv.setBigUint64(8, BigInt(mdatPayload + 16));
+      } else {
+        mdatDv.setUint32(0, (mdatPayload + 8) >>> 0);
+        for(let i=0; i<4; i++) mdatHdr[4+i] = 'mdat'.charCodeAt(i);
+      }
+
+      const parts = [ftyp, moov, mdatHdr];
+      for(let i=0; i<N; i++) parts.push(this.chunks[i].data);
+      return new Blob(parts, { type: 'video/mp4' });
+    }
+  }
+
+  async function pickH264EncoderConfig(width, height, fps){
+    const pixels = width * height;
+    const codecs = pixels > 1920 * 1080
+      ? ['avc1.4d0033', 'avc1.640033', 'avc1.4d0032', 'avc1.420033']
+      : ['avc1.4d002a', 'avc1.42E028', 'avc1.640028', 'avc1.42001f'];
+    const bitrate = Math.max(2500000, Math.min(8000000, Math.round(pixels * 3)));
+    for(const hw of ['prefer-hardware', 'no-preference']){
+      for(const codec of codecs){
+        const cfg = { codec, width, height, bitrate, framerate: fps || 30, avc: { format: 'avc' }, hardwareAcceleration: hw, latencyMode: 'realtime' };
+        try{
+          const sup = await VideoEncoder.isConfigSupported(cfg);
+          if(sup && sup.supported) return sup.config || cfg;
+        }catch(_){}
+      }
+    }
+    return null;
+  }
+
+  async function renderFastWebCodecs(orderedSegs, totalDur, started){
+    if(!currentSourceFile) return null;
+    if(!('VideoDecoder' in window) || !('VideoEncoder' in window) || !('EncodedVideoChunk' in window) || !('VideoFrame' in window)) return null;
+
+    setExportProgress(1, '영상 구조 분석 중 (고속 렌더링)');
+    const track = await parseMp4VideoTrack(currentSourceFile);
+    if(!track || !track.sampleCount) return null;
+
+    const decConfig = { codec: track.codec, description: track.description, optimizeForLatency: false };
+    let decSup = null;
+    try{ decSup = await VideoDecoder.isConfigSupported(decConfig); }catch(_){}
+    if(!decSup || !decSup.supported) return null;
+
+    const encW = stage.width - (stage.width % 2);
+    const encH = stage.height - (stage.height % 2);
+    if(encW < 16 || encH < 16) return null;
+    const encConfig = await pickH264EncoderConfig(encW, encH, track.fps);
+    if(!encConfig) return null;
+
+    const needResizeCanvas = (encW !== stage.width || encH !== stage.height);
+    const encCanvas = needResizeCanvas ? document.createElement('canvas') : null;
+    const encCtx = needResizeCanvas ? encCanvas.getContext('2d') : null;
+    if(encCanvas){ encCanvas.width = encW; encCanvas.height = encH; }
+
+    const muxer = new FastMp4Muxer(encW, encH);
+    let fatalError = null;
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => { try{ muxer.addChunk(chunk, meta); }catch(e){ fatalError = e; } },
+      error: (e) => { fatalError = e; }
+    });
+    encoder.configure(encConfig);
+
+    const frameDurUs = Math.max(10000, Math.round(1e6 / (track.fps || 30)));
+    let outCursorUs = 0;
+    let lastOutUs = -1;
+    let lastKeyUs = -1e9;
+    let encodedFrames = 0;
+    let elapsedSegDur = 0;
+    let lastUiAt = 0;
+
+    try{
+      for(const seg of orderedSegs){
+        if(exportCancelRequested) throw new Error('EXPORT_CANCELLED');
+        if(fatalError) throw fatalError;
+        resetMotion();
+        trackFrameCache = { t: -1, data: null };
+
+        // 해당 구간의 시작 직전 키프레임 ~ 구간 끝(+B프레임 여유) 인덱스 계산
+        let startIdx = 0;
+        for(let i=0; i<track.sampleCount; i++){
+          const tSec = (track.ptsArr[i] - track.ptsBase) / track.timescale;
+          if(tSec >= seg.start - 0.002){ startIdx = i; break; }
+          startIdx = i;
+        }
+        let keyIdx = startIdx;
+        while(keyIdx > 0 && !track.isKey[keyIdx]) keyIdx--;
+
+        let endIdx = startIdx;
+        for(let i=startIdx; i<track.sampleCount; i++){
+          const tSec = (track.ptsArr[i] - track.ptsBase) / track.timescale;
+          if(tSec <= seg.end + 0.002) endIdx = i;
+          else if(tSec > seg.end + 0.5) break;
+        }
+        const feedEndIdx = Math.min(track.sampleCount - 1, endIdx + 16);
+
+        let segFirstSrcT = null;
+        let segMaxSrcT = seg.start;
+        let frameChain = Promise.resolve();
+
+        const decoder = new VideoDecoder({
+          output: (frame) => {
+            frameChain = frameChain.then(async () => {
+              try{
+                if(exportCancelRequested) throw new Error('EXPORT_CANCELLED');
+                if(fatalError) return;
+                const srcT = frame.timestamp / 1e6;
+                if(srcT < seg.start - 0.002 || srcT > seg.end + 0.002) return;
+                if(segFirstSrcT === null) segFirstSrcT = srcT;
+                if(srcT > segMaxSrcT) segMaxSrcT = srcT;
+
+                activeFrameSource = frame;
+                updateActiveTrackers(srcT);
+                drawFrame(srcT, { editing: false });
+                activeFrameSource = null;
+
+                let srcForEnc = stage;
+                if(needResizeCanvas){
+                  encCtx.drawImage(stage, 0, 0, encW, encH);
+                  srcForEnc = encCanvas;
+                }
+                let outUs = outCursorUs + Math.max(0, Math.round((srcT - segFirstSrcT) * 1e6));
+                if(outUs <= lastOutUs) outUs = lastOutUs + Math.max(1000, Math.round(frameDurUs * 0.5));
+                lastOutUs = outUs;
+
+                const isKey = (encodedFrames === 0) || (outUs - lastKeyUs >= 2000000);
+                if(isKey) lastKeyUs = outUs;
+                const outFrame = new VideoFrame(srcForEnc, { timestamp: outUs, duration: frameDurUs });
+                try{
+                  encoder.encode(outFrame, { keyFrame: isKey });
+                } finally {
+                  outFrame.close();
+                }
+                encodedFrames++;
+
+                while(encoder.encodeQueueSize > 8 && !fatalError && !exportCancelRequested){
+                  await new Promise(r => setTimeout(r, 2));
+                }
+                if(exportCancelRequested) throw new Error('EXPORT_CANCELLED');
+                const nowMs = performance.now();
+                if(nowMs - lastUiAt > 300){
+                  lastUiAt = nowMs;
+                  const doneSec = elapsedSegDur + Math.max(0, srcT - seg.start);
+                  const p = clampNum(doneSec / totalDur, 0, 0.99);
+                  const wallSec = Math.max(0.05, (nowMs - started) / 1000);
+                  const speed = doneSec / wallSec;
+                  const remain = p > 0.03 ? wallSec * (1 - p) / p : null;
+                  setExportProgress(p * 100, `고속 렌더링 · ${fmt(doneSec)} / ${fmt(totalDur)}${remain != null ? ` · 약 ${Math.ceil(remain)}초 남음` : ''} (${speed.toFixed(1)}x)`);
+                  const pctStr = (duration ? (srcT / duration * 100) : 0) + '%';
+                  playhead.style.left = pctStr;
+                  seekThumb.style.left = pctStr;
+                  await new Promise(r => setTimeout(r, 0));
+                }
+              } finally {
+                activeFrameSource = null;
+                frame.close();
+              }
+            }).catch(e => { fatalError = e; });
+          },
+          error: (e) => { fatalError = e; }
+        });
+        decoder.configure(decConfig);
+
+        // 샘플을 8MB 단위로 묶어 읽어 파일 I/O 호출 횟수를 최소화합니다.
+        const BATCH_BYTES = 8 * 1024 * 1024;
+        let idx = keyIdx;
+        while(idx <= feedEndIdx && !fatalError && !exportCancelRequested){
+          let bStart = track.offsets[idx];
+          let bEnd = bStart + track.sizes[idx];
+          let j = idx;
+          while(j + 1 <= feedEndIdx){
+            const nOff = track.offsets[j + 1];
+            const nEnd = nOff + track.sizes[j + 1];
+            if(nOff >= bStart && nEnd - bStart <= BATCH_BYTES){
+              if(nEnd > bEnd) bEnd = nEnd;
+              j++;
+            } else break;
+          }
+          const buf = new Uint8Array(await currentSourceFile.slice(bStart, bEnd).arrayBuffer());
+          for(let k=idx; k<=j && !fatalError && !exportCancelRequested; k++){
+            while(decoder.decodeQueueSize > 8 && !fatalError && !exportCancelRequested){
+              await new Promise(r => setTimeout(r, 2));
+            }
+            if(exportCancelRequested) break;
+            const rel = track.offsets[k] - bStart;
+            const sampleBytes = buf.subarray(rel, rel + track.sizes[k]);
+            const ptsUs = Math.round(((track.ptsArr[k] - track.ptsBase) / track.timescale) * 1e6);
+            const durUs = Math.round((track.durArr[k] / track.timescale) * 1e6);
+            decoder.decode(new EncodedVideoChunk({
+              type: track.isKey[k] ? 'key' : 'delta',
+              timestamp: ptsUs,
+              duration: durUs,
+              data: sampleBytes
+            }));
+          }
+          idx = j + 1;
+        }
+
+        if(exportCancelRequested){
+          try{ if(decoder.state !== 'closed') decoder.close(); }catch(_){}
+          throw new Error('EXPORT_CANCELLED');
+        }
+        await decoder.flush();
+        await frameChain;
+        decoder.close();
+        if(exportCancelRequested) throw new Error('EXPORT_CANCELLED');
+        if(fatalError) throw fatalError;
+
+        if(lastOutUs >= outCursorUs) outCursorUs = lastOutUs + frameDurUs;
+        elapsedSegDur += (seg.end - seg.start);
+      }
+
+      setExportProgress(99, 'MP4 파일 마무리 중...');
+      await encoder.flush();
+      encoder.close();
+      if(fatalError) throw fatalError;
+      if(!muxer.chunks.length || !muxer.avcC) return null;
+
+      const mp4Blob = muxer.finalize();
+      return { blob: mp4Blob, mode: 'webcodecs', elapsedSec: (performance.now() - started) / 1000 };
+    } catch(err){
+      activeFrameSource = null;
+      try{ if(encoder.state !== 'closed') encoder.close(); }catch(_){}
+      if(exportCancelRequested || (err && err.message === 'EXPORT_CANCELLED')){
+        return { cancelled: true };
+      }
+      console.warn('WebCodecs 고속 렌더링 실패 — 실시간 녹화 방식으로 자동 전환합니다.', err);
+      return null;
+    }
+  }
 
   exportBtn.addEventListener('click', async () => {
+    // 렌더링 중 버튼을 다시 누르면 취소 요청
+    if(exporting){
+      if(!exportCancelRequested){
+        exportCancelRequested = true;
+        exportBtn.disabled = true;
+        exportBtn.innerHTML = `${ico('xmark')} 취소하는 중...`;
+        toast('렌더링을 취소하는 중입니다...', {type:'warn'});
+      }
+      return;
+    }
     if(segments.length === 0){ toast('내보낼 구간이 없습니다.', {type:'warn'}); return; }
-    if(exporting) return;
     const pendingRegions = allRegions().filter(r => r.pendingPlace);
     pendingRegions.forEach(r => removeRegion(r.id, {silent:true}));
     exporting = true;
+    exportCancelRequested = false;
     window.__lastExportBlob = null;
     window.__lastMobileMp4Blob = null;
-    exportBtn.disabled = true;
+    setExportingUI(true);
     deleteSegmentBtn.disabled = true;
     exportResult.innerHTML = '';
     setExportProgress(0, '렌더링 준비 중');
@@ -4401,71 +5174,107 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     srcVideo.pause(); setPlaying(false);
     const started = performance.now();
     try{
+      const orderedSegs = orderedSegments();
+      const totalDur = orderedSegs.reduce((a,s) => a + (s.end-s.start), 0) || 1;
+
+      // 1순위: WebCodecs 오프라인 고속 렌더링 (하드웨어 가속 H.264 MP4 직접 생성)
+      const fastRes = await renderFastWebCodecs(orderedSegs, totalDur, started);
+      if(fastRes && fastRes.cancelled){
+        exportResult.innerHTML = `<div class="notice warn">${ico('alert')}<div>렌더링을 취소했습니다.</div></div>`;
+        toast('렌더링을 취소했습니다.', {type:'warn'});
+        return;
+      }
+      if(fastRes && fastRes.blob){
+        setExportProgress(100, '렌더링 완료');
+        const mp4Blob = fastRes.blob;
+        const url = URL.createObjectURL(mp4Blob);
+        const speedX = (totalDur / Math.max(0.1, fastRes.elapsedSec)).toFixed(1);
+        exportResult.innerHTML = `
+          <div class="notice ok">${ico('check-circle')}<div>고속 렌더링 완료 · ${fmt(totalDur)} · ${fmtBytes(mp4Blob.size)} · ${fastRes.elapsedSec.toFixed(1)}초 소요 (${speedX}x)<br><span class="hint">아래 4단계에서 배부용 HTML을 바로 만들거나, MP4 영상 파일로 즉시 저장할 수 있습니다.</span></div></div>
+          <div class="row" style="margin-top:8px;">
+            <a class="dl" href="${url}" download="edited_${Date.now()}.mp4">${ico('download')} MP4로 PC 저장</a>
+          </div>
+          <div class="hint" id="mp4Status" style="margin-top:6px;">하드웨어 가속으로 MP4가 바로 생성되어 별도 변환 없이 즉시 재생·배부할 수 있습니다.</div>`;
+        window.__lastExportBlob = mp4Blob;
+        window.__lastMobileMp4Blob = mp4Blob;
+        saveHtmlPkgBtn.disabled = false;
+        toast(`고속 렌더링 완료 (${fastRes.elapsedSec.toFixed(1)}초, ${speedX}x)`, {type:'success'});
+        return;
+      }
+
+      // 2순위(폴백): 실시간 MediaRecorder 녹화 (MP4 지원 시 단일 인코더로 부하 절반 감소)
       const stream = stage.captureStream(30);
-      let mimeType = 'video/webm;codecs=vp9';
-      if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8';
-      if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const mp4Mime = getSupportedMp4RecorderMime();
+      let mimeType = mp4Mime || 'video/webm;codecs=vp8';
+      if(!mp4Mime){
+        if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp9';
+        if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
+      }
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: mp4Mime ? 2500000 : 4000000 });
       const chunks = [];
       recorder.ondataavailable = (e) => { if(e.data.size>0) chunks.push(e.data); };
-      const totalDur = segments.reduce((a,s) => a + (s.end-s.start), 0) || 1;
       let elapsed = 0;
+      let lastFallbackUiAt = 0;
       const done = new Promise((resolve) => { recorder.onstop = resolve; });
-
-      // 같은 화면을 MP4 녹화기로도 동시에 저장합니다(재생은 한 번만 하므로 시간이 늘지 않습니다).
-      const mp4Mime = getSupportedMp4RecorderMime();
-      let mp4Recorder = null, mp4Chunks = [], mp4Done = Promise.resolve();
-      if(mp4Mime){
-        try{
-          mp4Recorder = new MediaRecorder(stream, { mimeType: mp4Mime, videoBitsPerSecond: 2500000 });
-          mp4Recorder.ondataavailable = (e) => { if(e.data.size>0) mp4Chunks.push(e.data); };
-          mp4Done = new Promise((resolve) => { mp4Recorder.onstop = resolve; mp4Recorder.onerror = resolve; });
-        }catch(err){ console.warn('MP4 녹화기를 만들지 못했습니다.', err); mp4Recorder = null; }
-      }
 
       // captureStream은 recorder.start() 순간의 캔버스를 첫 프레임으로 잡을 수 있으므로 깨끗한 프레임을 먼저 그립니다.
       resetMotion();
-      await seekTo(segments[0].start);
-      drawFrame(segments[0].start, {editing:false});
-      recorder.start();
-      if(mp4Recorder) mp4Recorder.start(1000);
-      for(const seg of orderedSegments()){
+      await seekTo(orderedSegs[0].start);
+      drawFrame(orderedSegs[0].start, {editing:false});
+      recorder.start(1000);
+      for(const seg of orderedSegs){
+        if(exportCancelRequested) break;
         await seekTo(seg.start);
         resetMotion();
         drawFrame(seg.start, {editing:false});
         await new Promise(requestAnimationFrame);
         await playSegment(seg, (t) => {
+          const nowMs = performance.now();
+          if(nowMs - lastFallbackUiAt < 300) return;
+          lastFallbackUiAt = nowMs;
           const p = (elapsed + (t-seg.start))/totalDur;
-          const remain = p > 0.02 ? ((performance.now()-started)/1000) * (1-p)/p : null;
-          setExportProgress(p*100, `렌더링 중 · ${fmt(elapsed + (t-seg.start))} / ${fmt(totalDur)}${remain != null ? ` · 약 ${Math.ceil(remain)}초 남음` : ''}`);
+          const remain = p > 0.03 ? ((nowMs-started)/1000) * (1-p)/p : null;
+          setExportProgress(p*100, `실시간 렌더링 · ${fmt(elapsed + (t-seg.start))} / ${fmt(totalDur)}${remain != null ? ` · 약 ${Math.ceil(remain)}초 남음` : ''}`);
           updateTimeUI();
         });
         elapsed += (seg.end - seg.start);
       }
       recorder.stop();
-      if(mp4Recorder && mp4Recorder.state !== 'inactive') mp4Recorder.stop();
       await done;
-      await mp4Done;
 
-      const blob = new Blob(chunks, {type:'video/webm'});
-      let readyMp4 = null;
-      if(mp4Recorder && mp4Chunks.length){
-        try{
-          setExportProgress(100, 'MP4 파일 정리 중');
-          readyMp4 = await fixMp4Structure(new Blob(mp4Chunks, {type:'video/mp4'}));
-        }catch(err){ console.warn('MP4 정리 실패', err); readyMp4 = null; }
+      if(exportCancelRequested){
+        exportResult.innerHTML = `<div class="notice warn">${ico('alert')}<div>렌더링을 취소했습니다.</div></div>`;
+        toast('렌더링을 취소했습니다.', {type:'warn'});
+        return;
       }
-      const url = URL.createObjectURL(blob);
-      exportResult.innerHTML = `
-        <div class="notice ok">${ico('check-circle')}<div>렌더링 완료 · ${fmt(totalDur)} · ${fmtBytes(blob.size)}<br><span class="hint">아래 4단계에서 배부용 HTML을 만들거나, 영상 파일로 바로 저장할 수 있습니다.</span></div></div>
-        <div class="row" style="margin-top:8px;">
-          <a class="dl" href="${url}" download="edited_${Date.now()}.webm">${ico('download')} WebM으로 저장</a>
-          <button type="button" id="saveMp4Btn" class="btn btn-sm">${ico('download')} MP4로 PC 저장</button>
-        </div>
-        <div class="hint" id="mp4Status" style="margin-top:6px;">Windows 기본 영상 앱으로 보려면 MP4 저장을 사용하세요.</div>`;
-      window.__lastExportBlob = blob;
-      window.__lastMobileMp4Blob = readyMp4;
-      $('saveMp4Btn').addEventListener('click', saveLastExportAsMp4);
+
+      setExportProgress(100, '렌더링 완료');
+      if(mp4Mime){
+        const rawMp4 = new Blob(chunks, {type:'video/mp4'});
+        rawMp4.__needsFix = true;
+        exportResult.innerHTML = `
+          <div class="notice ok">${ico('check-circle')}<div>렌더링 완료 · ${fmt(totalDur)} · ${fmtBytes(rawMp4.size)}<br><span class="hint">아래 4단계에서 배부용 HTML을 만들거나, 영상 파일로 바로 저장할 수 있습니다.</span></div></div>
+          <div class="row" style="margin-top:8px;">
+            <button type="button" id="saveMp4Btn" class="btn btn-sm btn-primary">${ico('download')} MP4로 PC 저장</button>
+          </div>
+          <div class="hint" id="mp4Status" style="margin-top:6px;">Windows 기본 영상 앱으로 보려면 MP4 저장을 사용하세요.</div>`;
+        window.__lastExportBlob = rawMp4;
+        window.__lastMobileMp4Blob = rawMp4;
+        $('saveMp4Btn').addEventListener('click', saveLastExportAsMp4);
+      } else {
+        const blob = new Blob(chunks, {type:'video/webm'});
+        const url = URL.createObjectURL(blob);
+        exportResult.innerHTML = `
+          <div class="notice ok">${ico('check-circle')}<div>렌더링 완료 · ${fmt(totalDur)} · ${fmtBytes(blob.size)}<br><span class="hint">아래 4단계에서 배부용 HTML을 만들거나, 영상 파일로 바로 저장할 수 있습니다.</span></div></div>
+          <div class="row" style="margin-top:8px;">
+            <a class="dl" href="${url}" download="edited_${Date.now()}.webm">${ico('download')} WebM으로 저장</a>
+            <button type="button" id="saveMp4Btn" class="btn btn-sm">${ico('download')} MP4로 PC 저장</button>
+          </div>
+          <div class="hint" id="mp4Status" style="margin-top:6px;">Windows 기본 영상 앱으로 보려면 MP4 저장을 사용하세요.</div>`;
+        window.__lastExportBlob = blob;
+        window.__lastMobileMp4Blob = null;
+        $('saveMp4Btn').addEventListener('click', saveLastExportAsMp4);
+      }
       saveHtmlPkgBtn.disabled = false;
       toast('렌더링이 완료되었습니다.', {type:'success'});
     } catch(err){
@@ -4473,9 +5282,11 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       exportResult.innerHTML = `<div class="notice danger">${ico('alert')}<div>렌더링에 실패했습니다: ${escapeHtml(err.message || String(err))}</div></div>`;
       toast('렌더링에 실패했습니다.', {type:'error'});
     } finally {
+      activeFrameSource = null;
       hideExportProgress();
       exporting = false;
-      exportBtn.disabled = false;
+      exportCancelRequested = false;
+      setExportingUI(false);
       setToolbarStatus();
       resetMotion();
       rerender();
@@ -4552,7 +5363,14 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
 
   // 브라우저 MP4 녹화 결과는 길이 정보가 비어 있어 플레이어에서 플레이바가 움직이지 않습니다.
   // 화질은 그대로 두고(재인코딩 없이) 파일 구조만 고쳐서 길이와 탐색 정보를 채웁니다.
-  async function fixMp4Structure(blob){
+  async function fixMp4Structure(blob, timeoutMs = 45000){
+    // 엔진을 받지 못하거나 응답이 없으면 기다리지 않고 원본을 그대로 씁니다.
+    let timer;
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => { console.warn('MP4 정리 시간 초과 - 원본 사용'); resolve(blob); }, timeoutMs); });
+    try{ return await Promise.race([fixMp4StructureInner(blob), timeout]); }
+    finally{ clearTimeout(timer); }
+  }
+  async function fixMp4StructureInner(blob){
     try{
       const libs = await loadFFmpegLibs();
       const ff = await ensureFFmpegLoaded();
@@ -4581,6 +5399,12 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     try{
       const outName = `edited_${Date.now()}.mp4`;
       let mp4Blob = window.__lastMobileMp4Blob || null;
+      if(mp4Blob && mp4Blob.__needsFix){
+        status.textContent = 'MP4 파일 정리 중... (최대 45초)';
+        const fixed = await fixMp4Structure(mp4Blob);
+        if(fixed !== mp4Blob) window.__lastMobileMp4Blob = fixed;
+        mp4Blob = fixed;
+      }
       const directMime = getSupportedMp4RecorderMime();
       if(!mp4Blob && directMime){
         try{
@@ -4657,15 +5481,23 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
 
   function playSegment(seg, onProgress){
     return new Promise((resolve) => {
+      const useRvfc = typeof srcVideo.requestVideoFrameCallback === 'function';
+      const schedule = (fn) => useRvfc ? srcVideo.requestVideoFrameCallback(fn) : requestAnimationFrame(fn);
       srcVideo.play();
       function step(){
-        updateActiveTrackers(srcVideo.currentTime);
-        onProgress(srcVideo.currentTime);
-        drawFrame(srcVideo.currentTime, {editing:false}); // 편집용 표시선은 녹화되지 않습니다.
-        if(srcVideo.currentTime >= seg.end - 0.02 || srcVideo.paused){ srcVideo.pause(); resolve(); return; }
-        requestAnimationFrame(step);
+        const ct = srcVideo.currentTime;
+        // 같은 프레임은 다시 처리하지 않습니다. 종료 판단은 아래에서 매번 하므로 영상 끝에서도 멈추지 않습니다.
+        if(ct !== lastCt){
+          lastCt = ct;
+          updateActiveTrackers(ct);
+          onProgress(ct);
+          drawFrame(ct, {editing:false}); // 편집용 표시선은 녹화되지 않습니다.
+        }
+        if(ct >= seg.end - 0.02 || srcVideo.paused || srcVideo.ended || exportCancelRequested){ srcVideo.pause(); resolve(); return; }
+        schedule(step);
       }
-      requestAnimationFrame(step);
+      let lastCt = -1;
+      schedule(step);
     });
   }
 
@@ -6012,6 +6844,7 @@ if(document.readyState==='loading'){
 
   // 현재 원본 시각(t초)에 해당하는 날짜·시간을 화면 하단 가운데에 그립니다.
   // 편집 화면과 렌더링 모두 drawFrame을 거치므로 렌더링 영상에도 같은 표시가 들어갑니다.
+  let tsFontCache = { w: 0, fs: 16, tw: 0 };
   function drawTimestampOverlay(t){
     if(!tsEnable.checked || tsBase == null) return;
     const d = new Date(Math.floor((tsBase + t*1000) / 1000) * 1000);
@@ -6019,9 +6852,15 @@ if(document.readyState==='loading'){
     const text = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}   ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     const cy = stage.height * 0.938;
     ctx.save();
-    // 글자 폭이 프레임(캔버스) 가로의 약 20%가 되도록 글자 크기를 맞춥니다(스샷2의 비율).
-    ctx.font = `400 100px ${TS_MONO}`;
-    const fs = Math.max(10, Math.round(100 * stage.width * 0.20 / ctx.measureText(text).width));
+    // 글자 폭이 프레임(캔버스) 가로의 약 20%가 되도록 글자 크기를 캐싱합니다.
+    if(tsFontCache.w !== stage.width){
+      ctx.font = `400 100px ${TS_MONO}`;
+      const fs0 = Math.max(10, Math.round(100 * stage.width * 0.20 / ctx.measureText('2026-00-00   00:00:00').width));
+      ctx.font = `400 ${fs0}px ${TS_MONO}`;
+      tsFontCache = { w: stage.width, fs: fs0, tw: ctx.measureText('2026-00-00   00:00:00').width };
+    }
+    const fs = tsFontCache.fs;
+    const tw = tsFontCache.tw;
     ctx.font = `400 ${fs}px ${TS_MONO}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -6029,7 +6868,6 @@ if(document.readyState==='loading'){
     // 배경 상자 없이 글자만 그립니다. 밝은 영상에서도 읽히도록 약한 그림자만 줍니다.
     ctx.shadowColor = 'rgba(0,0,0,0.55)';
     ctx.shadowBlur = fs * 0.2;
-    const tw = ctx.measureText(text).width;
     const margin = stage.width * 0.03;
     const x = tsPos === 'left' ? margin + tw / 2
             : tsPos === 'right' ? stage.width - margin - tw / 2
