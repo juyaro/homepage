@@ -179,6 +179,8 @@
   .btn-primary:hover:not(:disabled){background:var(--blue-hover);}
   .btn-danger{color:var(--red); background:var(--red-tint);}
   .btn-danger:hover:not(:disabled){background:rgba(255,59,48,.2);}
+  .btn-exporting{background:var(--surface-2); color:var(--text-2); border:1px solid var(--line-strong); font-weight:600;}
+  .btn-exporting:hover:not(:disabled){background:var(--fill-2); color:var(--text);}
   .btn-orange{color:var(--orange); background:var(--orange-tint);}
   .btn-orange:hover:not(:disabled){background:rgba(255,149,0,.24);}
   .btn-green{background:var(--green); color:#fff; font-weight:600;}
@@ -309,19 +311,9 @@
   .progress.show{display:block;}
   .progress-label{display:flex; justify-content:space-between; font-size:11.5px; color:var(--text-2); margin-top:6px; font-variant-numeric:tabular-nums;}
 
-  /* 렌더링 중 타임라인 스무딩 & 캔버스 깜빡임 방지 오버레이 */
+  /* 렌더링 중 타임라인 스무딩 */
   .is-exporting .playhead,
   .is-exporting .seek-thumb{transition:left .32s linear;}
-  .render-shield{
-    position:absolute; inset:0; z-index:10;
-    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;
-    background:rgba(11,11,13,.72); color:#f5f5f7;
-    -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
-    font-size:13.5px; font-weight:500; pointer-events:none;
-    opacity:0; transition:opacity .25s var(--ease);
-  }
-  .stage-wrap.is-exporting .render-shield{opacity:1;}
-  .render-shield small{font-size:12px; color:#aeaeb2;}
 
   /* 칩 */
   .chip{display:inline-flex; align-items:center; gap:4px; height:20px; padding:0 8px; border-radius:10px; background:var(--fill); color:var(--text-2); font-size:11px; font-weight:600; white-space:nowrap;}
@@ -800,10 +792,6 @@
         <div class="empty-hint" id="emptyHint" hidden></div>
         <div class="stage-chip" id="stageChip" hidden></div>
         <div class="stage-chip auto" id="autoChip" hidden></div>
-        <div class="render-shield" id="renderShield" hidden>
-          <span>고속 렌더링 진행 중...</span>
-          <small>눈의 피로를 줄이기 위해 고속 재생 화면을 잠시 가렸습니다.</small>
-        </div>
       </div>
       <video id="srcVideo" hidden playsinline muted></video>
       <input type="file" id="fileInput" accept="video/mp4,.mp4,video/*" hidden>
@@ -4449,17 +4437,14 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     progressBar.style.width = '0%';
   }
   function setExportingUI(active){
-    const shield = $('renderShield');
     document.body.classList.toggle('is-exporting', active);
-    stageWrap.classList.toggle('is-exporting', active);
-    if(shield) shield.hidden = !active;
     if(active){
       exportBtn.disabled = false; // 취소 클릭이 가능하도록 활성 유지
       exportBtn.classList.remove('btn-primary');
-      exportBtn.classList.add('btn-danger');
+      exportBtn.classList.add('btn-exporting');
       exportBtn.innerHTML = `${ico('xmark')} 렌더링 취소`;
     } else {
-      exportBtn.classList.remove('btn-danger');
+      exportBtn.classList.remove('btn-exporting');
       exportBtn.classList.add('btn-primary');
       exportBtn.innerHTML = `${ico('export')} 선택 구간 렌더링 시작`;
       exportBtn.disabled = !duration || !segments.length;
