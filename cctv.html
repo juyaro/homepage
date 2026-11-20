@@ -2165,6 +2165,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
 
   function loadVideoBlob(blob, meta){
     if(playing){ srcVideo.pause(); setPlaying(false); }
+    videoStartOffset = 0;
     currentSourceFile = blob;
     currentSourceMeta = meta;
     if(lastLoadedURL) URL.revokeObjectURL(lastLoadedURL);
@@ -2253,6 +2254,9 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     rerender();
     updateTimeUI();
     if(srcVideo.readyState >= 2){
+      const ct0 = srcVideo.currentTime || 0;
+      if(ct0 > 0 && ct0 <= 0.5) videoStartOffset = ct0;
+      updateTimeUI();
       drawFrame(undefined, {editing:true});
     } else {
       emptyHint.hidden = false;
@@ -2264,7 +2268,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     if(!duration) return;
     // MP4 첫 프레임이 0.03초 등에서 시작하는 경우 오프셋을 기억해 둡니다.
     const ct = srcVideo.currentTime || 0;
-    videoStartOffset = (ct > 0 && ct <= 0.5) ? ct : 0;
+    if(videoStartOffset === 0 && ct > 0 && ct <= 0.5) videoStartOffset = ct;
     emptyHint.hidden = true;
     drawFrame(undefined, {editing:true});
     updateTimeUI();
@@ -2640,9 +2644,15 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     updateSeekThumb();
     seekVisual.classList.toggle('disabled', !duration || !segments.length);
   }
+  function displayTimeOf(t){
+    if(!isFinite(t)) return 0;
+    if(videoStartOffset > 0 && t <= videoStartOffset + 0.005) return 0;
+    return Math.max(0, t - videoStartOffset);
+  }
   function updateSeekThumb(){
     if(!duration) return;
-    const t = clampNum(srcVideo.currentTime || 0, 0, duration);
+    const rawT = clampNum(srcVideo.currentTime || 0, 0, duration);
+    const t = (videoStartOffset > 0 && rawT <= videoStartOffset + 0.005) ? 0 : rawT;
     seekThumb.style.left = (t/duration*100)+'%';
   }
   seekVisual.addEventListener('pointerdown', (e) => {
@@ -2670,9 +2680,12 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
   function lastKeptTime(){ return orderedSegments().at(-1)?.end ?? 0; }
 
   function updateTimeUI(){
-    const t = srcVideo.currentTime || 0;
-    timeLabel.innerHTML = `<strong>${fmtPrecise(t)}</strong><span>/ ${fmt(duration)}</span>`;
-    playhead.style.left = (duration ? (t/duration*100) : 0) + '%';
+    const rawT = srcVideo.currentTime || 0;
+    const dispT = displayTimeOf(rawT);
+    const dispDur = Math.max(0, duration - videoStartOffset);
+    timeLabel.innerHTML = `<strong>${fmtPrecise(dispT)}</strong><span>/ ${fmt(dispDur)}</span>`;
+    const posT = (videoStartOffset > 0 && rawT <= videoStartOffset + 0.005) ? 0 : rawT;
+    playhead.style.left = (duration ? (posT/duration*100) : 0) + '%';
     updateSeekThumb();
   }
 
