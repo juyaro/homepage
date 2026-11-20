@@ -2649,9 +2649,10 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     if(videoStartOffset > 0 && t <= videoStartOffset + 0.005) return 0;
     return Math.max(0, t - videoStartOffset);
   }
-  function updateSeekThumb(){
+  function updateSeekThumb(overrideTime){
     if(!duration) return;
-    const rawT = clampNum(srcVideo.currentTime || 0, 0, duration);
+    const baseT = (overrideTime !== undefined && isFinite(overrideTime)) ? overrideTime : (srcVideo.currentTime || 0);
+    const rawT = clampNum(baseT, 0, duration);
     const t = (videoStartOffset > 0 && rawT <= videoStartOffset + 0.005) ? 0 : rawT;
     seekThumb.style.left = (t/duration*100)+'%';
   }
@@ -2679,14 +2680,14 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
   function firstKeptTime(){ return orderedSegments()[0]?.start ?? 0; }
   function lastKeptTime(){ return orderedSegments().at(-1)?.end ?? 0; }
 
-  function updateTimeUI(){
-    const rawT = srcVideo.currentTime || 0;
+  function updateTimeUI(overrideTime){
+    const rawT = (overrideTime !== undefined && isFinite(overrideTime)) ? overrideTime : (srcVideo.currentTime || 0);
     const dispT = displayTimeOf(rawT);
     const dispDur = Math.max(0, duration - videoStartOffset);
     timeLabel.innerHTML = `<strong>${fmtPrecise(dispT)}</strong><span>/ ${fmt(dispDur)}</span>`;
     const posT = (videoStartOffset > 0 && rawT <= videoStartOffset + 0.005) ? 0 : rawT;
     playhead.style.left = (duration ? (posT/duration*100) : 0) + '%';
-    updateSeekThumb();
+    updateSeekThumb(rawT);
   }
 
   function getSegmentAtTime(t){
@@ -5069,9 +5070,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
                   const speed = doneSec / wallSec;
                   const remain = p > 0.03 ? wallSec * (1 - p) / p : null;
                   setExportProgress(p * 100, `고속 렌더링 · ${fmt(doneSec)} / ${fmt(totalDur)}${remain != null ? ` · 약 ${Math.ceil(remain)}초 남음` : ''} (${speed.toFixed(1)}x)`);
-                  const pctStr = (duration ? (srcT / duration * 100) : 0) + '%';
-                  playhead.style.left = pctStr;
-                  seekThumb.style.left = pctStr;
+                  updateTimeUI(srcT);
                   await new Promise(r => setTimeout(r, 0));
                 }
               } finally {
