@@ -315,6 +315,11 @@
   .is-exporting .playhead,
   .is-exporting .seek-thumb{transition:left .32s linear;}
 
+  /* 렌더링 화질/용량 프리셋 */
+  .export-quality-box{padding:10px 12px; border-radius:12px; background:var(--surface-2); margin-bottom:12px;}
+  .export-quality-row{display:flex; align-items:center; justify-content:space-between; gap:10px;}
+  .export-quality-label{font-size:12.5px; font-weight:600; color:var(--text);}
+
   /* 칩 */
   .chip{display:inline-flex; align-items:center; gap:4px; height:20px; padding:0 8px; border-radius:10px; background:var(--fill); color:var(--text-2); font-size:11px; font-weight:600; white-space:nowrap;}
   .chip .ic{width:12px; height:12px;}
@@ -960,6 +965,17 @@
         <div class="summary-item"><div class="k">남는 길이</div><div class="v" id="sumKept">—</div></div>
         <div class="summary-item"><div class="k">모자이크</div><div class="v" id="sumRegions">—</div></div>
         <div class="summary-item"><div class="k">제외 영역</div><div class="v" id="sumReveals">—</div></div>
+      </div>
+      <div class="export-quality-box">
+        <div class="export-quality-row">
+          <span class="export-quality-label">화질 · 용량</span>
+          <div class="segmented" id="exportQuality" role="radiogroup" aria-label="렌더링 화질 및 용량">
+            <button type="button" data-q="light">경량</button>
+            <button type="button" data-q="standard" class="active">표준</button>
+            <button type="button" data-q="high">고화질</button>
+          </div>
+        </div>
+        <div class="hint" id="exportQualityNote" style="margin-top:6px;">원본 해상도 유지 · 화질과 용량의 균형 (권장)</div>
       </div>
       <button type="button" id="exportBtn" class="btn btn-primary btn-lg btn-block" disabled><svg class="ic"><use href="#ic-export"/></svg> 선택 구간 렌더링 시작</button>
       <div class="progress" id="progressWrap"><div id="progressBar"></div></div>
@@ -4457,8 +4473,81 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     lastProgressPct = 0;
     progressBar.style.width = '0%';
   }
+  // 렌더링 화질 · 용량 프리셋
+  const EXPORT_QUALITY_KEY = 'cctvExportQuality';
+  const EXPORT_PRESETS = {
+    light: {
+      label: '경량',
+      maxLongEdge: 1280,      // 최대 720p(1280×720) 축소
+      bpp: 1.15,
+      minBitrate: 450000,     // 450 kbps
+      maxBitrate: 1500000,    // 1.5 Mbps
+      keyIntervalUs: 4000000, // 4초
+      note: '모바일 배부 최적화 · 최대 720p 축소로 용량 대폭 절감'
+    },
+    standard: {
+      label: '표준',
+      maxLongEdge: 0,         // 원본 해상도 유지
+      bpp: 1.8,
+      minBitrate: 750000,     // 750 kbps
+      maxBitrate: 3500000,    // 3.5 Mbps
+      keyIntervalUs: 3000000, // 3초
+      note: '원본 해상도 유지 · 화질과 용량의 균형 (권장)'
+    },
+    high: {
+      label: '고화질',
+      maxLongEdge: 0,         // 원본 해상도 유지
+      bpp: 3.0,
+      minBitrate: 1500000,    // 1.5 Mbps
+      maxBitrate: 7000000,    // 7.0 Mbps
+      keyIntervalUs: 2000000, // 2초
+      note: '원본 해상도 유지 · 세밀한 식별용 (용량 큼)'
+    }
+  };
+  let exportQualityMode = (() => {
+    try{
+      const saved = localStorage.getItem(EXPORT_QUALITY_KEY);
+      return EXPORT_PRESETS[saved] ? saved : 'standard';
+    }catch(_){ return 'standard'; }
+  })();
+  function getExportPreset(){ return EXPORT_PRESETS[exportQualityMode] || EXPORT_PRESETS.standard; }
+  function computeExportDims(srcW, srcH, preset){
+    let w = srcW, h = srcH;
+    if(preset.maxLongEdge > 0 && Math.max(w, h) > preset.maxLongEdge){
+      const scale = preset.maxLongEdge / Math.max(w, h);
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+    }
+    w = Math.max(16, w - (w % 2));
+    h = Math.max(16, h - (h % 2));
+    return { w, h };
+  }
+  function computeExportBitrate(w, h, preset){
+    return Math.max(preset.minBitrate, Math.min(preset.maxBitrate, Math.round(w * h * preset.bpp)));
+  }
+  function syncExportQualityUI(){
+    const box = $('exportQuality');
+    const note = $('exportQualityNote');
+    const preset = getExportPreset();
+    if(box){
+      box.querySelectorAll('button[data-q]').forEach(b => b.classList.toggle('active', b.dataset.q === exportQualityMode));
+    }
+    if(note) note.textContent = preset.note;
+  }
+  $('exportQuality')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-q]');
+    if(!btn || exporting) return;
+    const q = btn.dataset.q;
+    if(!EXPORT_PRESETS[q]) return;
+    exportQualityMode = q;
+    try{ localStorage.setItem(EXPORT_QUALITY_KEY, q); }catch(_){}
+    syncExportQualityUI();
+  });
+  syncExportQualityUI();
+
   function setExportingUI(active){
     document.body.classList.toggle('is-exporting', active);
+    $('exportQuality')?.querySelectorAll('button').forEach(b => { b.disabled = active; });
     if(active){
       exportBtn.disabled = false; // 취소 클릭이 가능하도록 활성 유지
       exportBtn.classList.remove('btn-primary');
@@ -4935,19 +5024,22 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     }
   }
 
-  async function pickH264EncoderConfig(width, height, fps){
+  async function pickH264EncoderConfig(width, height, fps, preset){
+    const p = preset || getExportPreset();
     const pixels = width * height;
     const codecs = pixels > 1920 * 1080
       ? ['avc1.4d0033', 'avc1.640033', 'avc1.4d0032', 'avc1.420033']
       : ['avc1.4d002a', 'avc1.42E028', 'avc1.640028', 'avc1.42001f'];
-    const bitrate = Math.max(2500000, Math.min(8000000, Math.round(pixels * 3)));
+    const bitrate = computeExportBitrate(width, height, p);
     for(const hw of ['prefer-hardware', 'no-preference']){
-      for(const codec of codecs){
-        const cfg = { codec, width, height, bitrate, framerate: fps || 30, avc: { format: 'avc' }, hardwareAcceleration: hw, latencyMode: 'realtime' };
-        try{
-          const sup = await VideoEncoder.isConfigSupported(cfg);
-          if(sup && sup.supported) return sup.config || cfg;
-        }catch(_){}
+      for(const latencyMode of ['quality', 'realtime']){
+        for(const codec of codecs){
+          const cfg = { codec, width, height, bitrate, framerate: fps || 30, avc: { format: 'avc' }, hardwareAcceleration: hw, latencyMode };
+          try{
+            const sup = await VideoEncoder.isConfigSupported(cfg);
+            if(sup && sup.supported) return sup.config || cfg;
+          }catch(_){}
+        }
       }
     }
     return null;
@@ -4966,16 +5058,21 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
     try{ decSup = await VideoDecoder.isConfigSupported(decConfig); }catch(_){}
     if(!decSup || !decSup.supported) return null;
 
-    const encW = stage.width - (stage.width % 2);
-    const encH = stage.height - (stage.height % 2);
+    const preset = getExportPreset();
+    const { w: encW, h: encH } = computeExportDims(stage.width, stage.height, preset);
     if(encW < 16 || encH < 16) return null;
-    const encConfig = await pickH264EncoderConfig(encW, encH, track.fps);
+    const encConfig = await pickH264EncoderConfig(encW, encH, track.fps, preset);
     if(!encConfig) return null;
 
     const needResizeCanvas = (encW !== stage.width || encH !== stage.height);
     const encCanvas = needResizeCanvas ? document.createElement('canvas') : null;
     const encCtx = needResizeCanvas ? encCanvas.getContext('2d') : null;
-    if(encCanvas){ encCanvas.width = encW; encCanvas.height = encH; }
+    if(encCanvas){
+      encCanvas.width = encW;
+      encCanvas.height = encH;
+      encCtx.imageSmoothingEnabled = true;
+      encCtx.imageSmoothingQuality = 'high';
+    }
 
     const muxer = new FastMp4Muxer(encW, encH);
     let fatalError = null;
@@ -5047,7 +5144,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
                 if(outUs <= lastOutUs) outUs = lastOutUs + Math.max(1000, Math.round(frameDurUs * 0.5));
                 lastOutUs = outUs;
 
-                const isKey = (encodedFrames === 0) || (outUs - lastKeyUs >= 2000000);
+                const isKey = (encodedFrames === 0) || (outUs - lastKeyUs >= preset.keyIntervalUs);
                 if(isKey) lastKeyUs = outUs;
                 const outFrame = new VideoFrame(srcForEnc, { timestamp: outUs, duration: frameDurUs });
                 try{
@@ -5139,7 +5236,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
       if(!muxer.chunks.length || !muxer.avcC) return null;
 
       const mp4Blob = muxer.finalize();
-      return { blob: mp4Blob, mode: 'webcodecs', elapsedSec: (performance.now() - started) / 1000 };
+      return { blob: mp4Blob, mode: 'webcodecs', elapsedSec: (performance.now() - started) / 1000, width: encW, height: encH, presetLabel: preset.label };
     } catch(err){
       activeFrameSource = null;
       try{ if(encoder.state !== 'closed') encoder.close(); }catch(_){}
@@ -5194,7 +5291,7 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         const url = URL.createObjectURL(mp4Blob);
         const speedX = (totalDur / Math.max(0.1, fastRes.elapsedSec)).toFixed(1);
         exportResult.innerHTML = `
-          <div class="notice ok">${ico('check-circle')}<div>고속 렌더링 완료 · ${fmt(totalDur)} · ${fmtBytes(mp4Blob.size)} · ${fastRes.elapsedSec.toFixed(1)}초 소요 (${speedX}x)<br><span class="hint">아래 4단계에서 배부용 HTML을 바로 만들거나, MP4 영상 파일로 즉시 저장할 수 있습니다.</span></div></div>
+          <div class="notice ok">${ico('check-circle')}<div>고속 렌더링 완료 (${fastRes.presetLabel} · ${fastRes.width}×${fastRes.height}) · ${fmt(totalDur)} · ${fmtBytes(mp4Blob.size)} · ${fastRes.elapsedSec.toFixed(1)}초 소요 (${speedX}x)<br><span class="hint">아래 4단계에서 배부용 HTML을 바로 만들거나, MP4 영상 파일로 즉시 저장할 수 있습니다.</span></div></div>
           <div class="row" style="margin-top:8px;">
             <a class="dl" href="${url}" download="edited_${Date.now()}.mp4">${ico('download')} MP4로 PC 저장</a>
           </div>
@@ -5214,7 +5311,9 @@ self.onmessage = async ({ data: { id, type, data: _data } }) => {
         if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp9';
         if(!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
       }
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: mp4Mime ? 2500000 : 4000000 });
+      const fbPreset = getExportPreset();
+      const fbBitrate = computeExportBitrate(stage.width, stage.height, fbPreset);
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: mp4Mime ? fbBitrate : Math.round(fbBitrate * 1.25) });
       const chunks = [];
       recorder.ondataavailable = (e) => { if(e.data.size>0) chunks.push(e.data); };
       let elapsed = 0;
