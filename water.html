@@ -608,11 +608,18 @@ body.secure-view [contenteditable="true"]{-webkit-user-select:text;user-select:t
 .st.memo{background:var(--orange-soft);color:var(--orange);}
 .st.watch,.st.none{background:var(--gray-soft);color:var(--text-2);}
 .st.ok{background:var(--green-soft);color:var(--green);}
+.cmp-sort{margin-left:auto;font:inherit;font-size:13px;color:var(--accent);background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-sm);padding:4px 8px;outline:none;}
+.cmp-basis{display:block;font-size:11px;color:var(--text-2);margin-top:2px;}
 .cmp-foot{font-size:12px;color:var(--text-2);line-height:1.5;margin:0;padding:0 4px;}
 @media (max-width:760px){
   .cmp-title{font-size:24px;}
   .cmp-filter{flex-wrap:wrap;}
 }
+/* ---- 월 선택 ---- */
+.cmp-months{display:flex;gap:6px;flex-wrap:wrap;padding:10px 12px;}
+.cmp-month{font:inherit;font-size:13px;font-weight:600;padding:6px 12px;border-radius:999px;border:none;background:var(--gray-soft);color:var(--text-2);cursor:pointer;}
+.cmp-month:hover{color:var(--text);}
+.cmp-month.on{background:var(--accent);color:var(--accent-text);}
 /* ---- 이전 작업 이어하기 창 ---- */
 .resume-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:1000;padding:20px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
 .resume-backdrop.show{display:flex;}
@@ -5194,7 +5201,7 @@ function trimOldInvoiceImages(){
 }
 
 /* ---------------- 역별 사용량 점검 ---------------- */
-const CMP = { start: '', end: '', threshold: 1.5 };
+const CMP = { start: '', end: '', threshold: 1.1, sort: 'order' };
 if(!Array.isArray(STATE.daily)) STATE.daily = [];
 
 // 엑셀 역명 → 청구서 역명 (이름이 다른 역만 기재)
@@ -5288,14 +5295,14 @@ function cmpStatus(ratio, hasNote){
   if(ratio >= CMP.threshold){
     return hasNote ? { key:'memo', label:'메모 확인', cls:'memo' } : { key:'need', label:'확인 필요', cls:'need' };
   }
-  if(ratio >= 1.2) return { key:'watch', label:'관찰', cls:'watch' };
+  if(ratio >= 1.2 && CMP.threshold > 1.2) return { key:'watch', label:'관찰', cls:'watch' };
   return { key:'ok', label:'정상', cls:'ok' };
 }
 
 function compareHTML(){
   const days = [...new Set(STATE.daily.map(x => x.d))].sort();
   const head = `<div><h2 class="cmp-title">역별 사용량 점검</h2><p class="cmp-sub">선택한 기간의 역별 일평균을 작년 동월·전월·1~전월 평균과 비교합니다</p></div>`;
-  const uploadBtn = `<button class="btn tinted small" id="cmpUploadBtn">${days.length ? '엑셀 다시 불러오기' : '일별 엑셀 불러오기'}</button><input type="file" id="cmpFileInput" accept=".xlsx,.xls" hidden>`;
+  const uploadBtn = `<button class="btn tinted small" id="cmpUploadBtn">엑셀 불러오기</button><input type="file" id="cmpFileInput" accept=".xlsx,.xls" hidden>${days.length ? ' <button class="btn tinted small" id="cmpExportBtn">엑셀 다운로드</button>' : ''}`;
   if(!days.length){
     return `<div class="cmp-wrap">${head}<div class="cmp-group"><div class="cmp-row"><span class="cmp-k">일별 사용량 엑셀(역무일지)을 불러와 주세요</span>${uploadBtn}</div></div></div>`;
   }
@@ -5308,6 +5315,7 @@ function compareHTML(){
     CMP.end = monDays[monDays.length - 1];
   }
   const mon = CMP.start.slice(0, 7);
+  const months = [...new Set(days.map(d => d.slice(0, 7)))].sort();
   const monthDays = days.filter(d => d.startsWith(mon));
   const firstDay = monthDays[0], lastDay = monthDays[monthDays.length - 1];
   if(CMP.end < CMP.start || CMP.end.slice(0, 7) !== mon) CMP.end = CMP.start;
@@ -5321,25 +5329,43 @@ function compareHTML(){
     a.sum += x.u; a.n += 1;
     if(x.n) a.notes.push(`${Number(x.d.slice(8))}일 ${x.n.replace(/\s+/g, ' ')}`);
   });
-  const list = [...agg.entries()].map(([s, a]) => {
+  const prevYm = U > 1 ? `${mon.slice(0, 5)}${cmpPad(U - 1)}` : null;
+  const om = cmpOrderMap();
+  const list = [...agg.entries()].filter(([s]) => cmpInBill(s)).map(([s, a]) => {
     const cur = a.sum / a.n;
     const b = cmpBaselines(s, U);
-    const ratio = b.prevYear ? cur / b.prevYear : null;
-    return { s, n:a.n, cur, b, ratio, notes:a.notes, st: cmpStatus(ratio, a.notes.length > 0) };
-  }).sort((x, y) => (y.ratio ?? -1) - (x.ratio ?? -1));
+    let basis = null, ref = null;
+    if(b.prevYear){ basis = 'prevYear'; ref = b.prevYear; }
+    else {
+      const pd = cmpDailyAvgOf(s, prevYm);          // 작년 기준이 없으면 엑셀의 전월 일평균과 비교
+      if(pd){ basis = 'prevDaily'; ref = pd; }
+    }
+    const ratio = ref ? cur / ref : null;
+    return { s, n:a.n, cur, b, ratio, basis, ord: cmpOrderOf(s, om), notes:a.notes, st: cmpStatus(ratio, a.notes.length > 0) };
+  });
+  const byOrder = (x, y) => (x.ord - y.ord) || x.s.localeCompare(y.s, 'ko');
+  const nullLast = (a, b, desc) => (a == null && b == null) ? 0 : (a == null ? 1 : (b == null ? -1 : (desc ? b - a : a - b)));
+  const sorters = {
+    order:     byOrder,
+    ratioDesc: (x, y) => nullLast(x.ratio, y.ratio, true)  || byOrder(x, y),
+    ratioAsc:  (x, y) => nullLast(x.ratio, y.ratio, false) || byOrder(x, y),
+    curDesc:   (x, y) => (y.cur - x.cur) || byOrder(x, y)
+  };
+  list.sort(sorters[CMP.sort] || byOrder);
 
   const cnt = k => list.filter(x => x.st.key === k).length;
   const fmt = v => v == null ? '-' : v.toFixed(1);
   const pct = r => r == null ? '-' : `${r >= 1 ? '+' : ''}${Math.round((r - 1) * 100)}%`;
   const pctCls = r => r == null ? '' : (r >= CMP.threshold ? 'hi' : (r >= 1.2 ? 'mid' : ''));
   const range = CMP.start === CMP.end ? CMP.start : `${CMP.start} ~ ${CMP.end}`;
+  CMP.last = { list, U, range };
 
   const body = list.length ? list.map(x => `
       <tr>
         <td>${cmpEsc(x.s)}</td>
         <td>${fmt(x.cur)}</td>
         <td>${fmt(x.b.prevYear)}</td>
-        <td><span class="cmp-pct ${pctCls(x.ratio)}">${pct(x.ratio)}</span></td>
+        <td><span class="cmp-pct ${pctCls(x.ratio)}">${pct(x.ratio)}</span>${x.basis === 'prevDaily' ? '<small class="cmp-basis">엑셀 전월 대비</small>' : ''}</td>
         <td>${fmt(x.b.prevMonth)}</td>
         <td>${fmt(x.b.ytd)}</td>
         <td><span class="st ${x.st.cls}">${x.st.label}</span></td>
@@ -5350,13 +5376,14 @@ function compareHTML(){
   return `
   <div class="cmp-wrap">
     ${head}
+    ${months.length > 1 ? `<div class="cmp-group"><div class="cmp-months">${months.map(m => `<button class="cmp-month${m === mon ? ' on' : ''}" data-month="${m}">${Number(m.slice(5))}월</button>`).join('')}</div></div>` : ''}
     <div class="cmp-group">
       <div class="cmp-row cmp-filter">
         <div class="cmp-fields">
           <input type="date" id="cmpStart" value="${CMP.start}" min="${firstDay}" max="${lastDay}" aria-label="시작일">
           <span class="cmp-k">~</span>
           <input type="date" id="cmpEnd" value="${CMP.end}" min="${CMP.start}" max="${lastDay}" aria-label="종료일">
-          <select id="cmpThreshold" aria-label="확인 기준">${[1.3, 1.5, 2].map(v => `<option value="${v}"${CMP.threshold === v ? ' selected' : ''}>${v}배 이상</option>`).join('')}</select>
+          <select id="cmpThreshold" aria-label="확인 기준">${[1.1, 1.2, 1.3, 1.4, 1.5, 2].map(v => `<option value="${v}"${CMP.threshold === v ? ' selected' : ''}>${v}배 이상</option>`).join('')}</select>
         </div>
         <div class="cmp-fields">
           <span class="cmp-k">일별 자료 ${days[0]} ~ ${days[days.length - 1]} (${days.length}일)</span>
@@ -5371,6 +5398,7 @@ function compareHTML(){
         <span class="st watch">관찰 ${cnt('watch')}</span>
         <span class="st ok">정상 ${cnt('ok')}</span>
         <span class="st none">기준 없음 ${cnt('none')}</span>
+        <select id="cmpSort" class="cmp-sort" aria-label="정렬">${[['order','월별 탭 순서'],['ratioDesc','작년 대비 높은 순'],['ratioAsc','작년 대비 낮은 순'],['curDesc','일평균 높은 순']].map(([v, l]) => `<option value="${v}"${CMP.sort === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
       </div>
     </div>
     <div class="cmp-tablewrap">
@@ -5389,7 +5417,7 @@ function compareHTML(){
       </table>
     </div>
     <p class="cmp-foot">선택 기간: ${range} (${U}월 사용분, ${rows.length}건)<br>
-    고지 규칙: 사용월 M → M+1월 고지. 작년 동월은 작년 ${U}월 사용분 = ${U < 12 ? U + 1 : '익년 1'}월 고지, 전월은 ${U - 1}월 사용분 = ${U}월 고지, 1~${U - 1}월 평균은 1~${U - 1}월 사용분 = 2~${U}월 고지의 평균입니다. 1월 고지는 전년 12월 사용분이므로 제외합니다. 청구 일평균과 비교하므로 참고용입니다.</p>
+    고지 규칙: 사용월 M → M+1월 고지. 작년 동월은 작년 ${U}월 사용분 = ${U < 12 ? U + 1 : '익년 1'}월 고지, 전월은 ${U - 1}월 사용분 = ${U}월 고지, 1~${U - 1}월 평균은 1~${U - 1}월 사용분 = 2~${U}월 고지의 평균입니다. 1월 고지는 전년 12월 사용분이므로 제외합니다. 청구 일평균과 비교하므로 참고용입니다. 작년 기준이 없는 역은 엑셀의 전월 일평균과 비교하며 ‘엑셀 전월 대비’로 표시합니다. 역 순서는 월별 탭의 연번을 따릅니다.</p>
   </div>`;
 }
 
@@ -5418,8 +5446,167 @@ document.addEventListener('change', async e => {
   }
   if(t.id === 'cmpStart' && t.value){ CMP.start = t.value; render(); return; }
   if(t.id === 'cmpEnd' && t.value){ CMP.end = t.value; render(); return; }
-  if(t.id === 'cmpThreshold'){ CMP.threshold = Number(t.value) || 1.5; render(); }
+  if(t.id === 'cmpThreshold'){ CMP.threshold = Number(t.value) || 1.1; render(); }
+  if(t.id === 'cmpSort'){ CMP.sort = t.value; render(); }
 });
+
+const CMP_XL = {
+  title:  { font:{name:'맑은 고딕', size:14, bold:true, color:{rgb:'0E2E35'}}, alignment:{vertical:'center', horizontal:'left'} },
+  header: { fill:{fgColor:{rgb:'0B3A42'}}, font:{name:'맑은 고딕', size:10, bold:true, color:{rgb:'FFFFFF'}}, alignment:{vertical:'center', horizontal:'center', wrapText:true}, border:cmpXlBorder('DCE8E8') },
+  total:  { fill:{fgColor:{rgb:'B7E4DD'}}, font:{name:'맑은 고딕', size:10, bold:true, color:{rgb:'0B3A42'}}, alignment:{vertical:'center'},
+            border:{ top:{style:'thin', color:{rgb:'1B7F8C'}}, bottom:{style:'medium', color:{rgb:'0B3A42'}}, left:{style:'thin', color:{rgb:'DCE8E8'}}, right:{style:'thin', color:{rgb:'DCE8E8'}} } },
+  data:   { font:{name:'맑은 고딕', size:10, color:{rgb:'0E2E35'}}, alignment:{vertical:'center'}, border:cmpXlBorder('EEF4F4') }
+};
+function cmpXlBorder(c){ const b = { style:'thin', color:{rgb:c} }; return { top:b, bottom:b, left:b, right:b }; }
+
+// aoa: [제목, 빈줄, 머리글, 합계, 데이터...] 형식 (월별 자료 시트와 같은 구성)
+function writeStyledSheet(aoa, spec, widths){
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const nCols = spec.length;
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  ws['!merges'] = [{ s:{r:0, c:0}, e:{r:0, c:nCols - 1} }];
+  ws['!cols'] = widths.map(w => ({ wch:w }));
+  ws['!rows'] = aoa.map((row, r) => {
+    if(r === 0) return { hpt: 30 };
+    if(r === 2) return { hpt: 34 };
+    if(r < 4) return { hpt: 22 };
+    // 메모 열(마지막 열)의 줄 수에 맞춰 행 높이를 늘려 모든 메모가 보이게 함
+    const memo = String(row[nCols - 1] ?? '');
+    const lines = memo ? memo.split('\n').reduce((a, l) => a + Math.max(1, Math.ceil(l.length / 60)), 0) : 1;
+    return { hpt: Math.max(22, 15 * lines + 8) };
+  });
+  for(let R = range.s.r; R <= range.e.r; R++){
+    for(let C = 0; C < nCols; C++){
+      const ref = XLSX.utils.encode_cell({ r:R, c:C });
+      if(!ws[ref]) ws[ref] = { t:'s', v:'' };
+      if(R === 0){ ws[ref].s = CMP_XL.title; continue; }
+      if(R === 1) continue;
+      if(R === 2){ ws[ref].s = CMP_XL.header; continue; }
+      const st = JSON.parse(JSON.stringify(R === 3 ? CMP_XL.total : CMP_XL.data));
+      st.alignment.horizontal = spec[C].align;
+      if(spec[C].wrap) st.alignment.wrapText = true;
+      ws[ref].s = st;
+      if(spec[C].fmt && typeof ws[ref].v === 'number') ws[ref].z = spec[C].fmt;
+    }
+  }
+  return ws;
+}
+
+const CMP_PCT_FMT = '+0.0%;-0.0%;0.0%';
+const CMP_NUM_FMT = '#,##0.0';
+const cmpRound = v => (v == null || v === '') ? '' : Math.round(v * 10) / 10;
+
+function compareAoa(d){
+  const U = d.U;
+  const prevKey = U < 12 ? `${U + 1}월 고지` : '익년 1월 고지';
+  const basisLabel = x => x.basis === 'prevYear' ? `작년 ${U}월 대비` : (x.basis === 'prevDaily' ? `엑셀 ${U - 1}월 대비` : '기준 없음');
+  const withPY = d.list.filter(x => x.b.prevYear);
+  const withPM = d.list.filter(x => x.b.prevMonth);
+  const sum = (arr, f) => arr.reduce((a, x) => a + f(x), 0);
+  const totPY = sum(withPY, x => x.b.prevYear), totPM = sum(withPM, x => x.b.prevMonth);
+  const total = ['', '계', cmpRound(sum(d.list, x => x.cur)), cmpRound(totPY), totPY ? sum(withPY, x => x.cur) / totPY - 1 : '',
+                 cmpRound(totPM), totPM ? sum(withPM, x => x.cur) / totPM - 1 : '', '', '', '', ''];
+  const rows = d.list.map((x, i) => [
+    i + 1, x.s, cmpRound(x.cur),
+    x.basis === 'prevYear' ? cmpRound(x.b.prevYear) : '',
+    x.ratio != null ? x.ratio - 1 : '',
+    cmpRound(x.b.prevMonth),
+    x.b.prevMonth ? x.cur / x.b.prevMonth - 1 : '',
+    cmpRound(x.b.ytd),
+    x.st.label, basisLabel(x), x.notes.join('\n')
+  ]);
+  const header = ['연번', '역', `${U}월 일평균\n(선택 기간)`, `작년 ${U}월 일평균\n(${prevKey})`, '작년 대비',
+                  `${U - 1}월 일평균\n(${U}월 고지)`, '전월 대비', `1~${U - 1}월 평균\n(2~${U}월 고지)`, '판정', '기준', '역무일지 메모'];
+  const title = `역별 사용량 점검 · ${U}월 사용분 · 선택 기간 ${d.range} · 확인 기준 ${CMP.threshold}배 이상`;
+  return [[title], [''], header, total, ...rows];
+}
+const COMPARE_SPEC = [
+  {align:'center'}, {align:'left'}, {align:'right', fmt:CMP_NUM_FMT}, {align:'right', fmt:CMP_NUM_FMT}, {align:'right', fmt:CMP_PCT_FMT},
+  {align:'right', fmt:CMP_NUM_FMT}, {align:'right', fmt:CMP_PCT_FMT}, {align:'right', fmt:CMP_NUM_FMT},
+  {align:'center'}, {align:'center'}, {align:'left', wrap:true}
+];
+const COMPARE_WIDTHS = [6, 24, 14, 16, 12, 16, 12, 18, 10, 16, 70];
+
+// 여러 달 자료일 때: 역별 월 일평균과 전월 대비 추이
+function monthlyAoa(){
+  const months = [...new Set(STATE.daily.map(x => x.d.slice(0, 7)))].sort();
+  if(months.length < 2) return null;
+  const om = cmpOrderMap();
+  const stations = [...new Set(STATE.daily.map(x => x.s))]
+    .filter(s => cmpInBill(s))
+    .map(s => ({ s, ord: cmpOrderOf(s, om) }))
+    .sort((a, b) => (a.ord - b.ord) || a.s.localeCompare(b.s, 'ko'))
+    .map(x => x.s);
+  const label = ym => `${Number(ym.slice(5))}월`;
+  const avgs = stations.map(s => months.map(m => cmpDailyAvgOf(s, m)));
+
+  const header = ['연번', '역'];
+  const spec = [{align:'center'}, {align:'left'}];
+  months.forEach((m, j) => {
+    header.push(`${label(m)} 일평균`); spec.push({align:'right', fmt:CMP_NUM_FMT});
+    if(j > 0){ header.push(`${label(m)} 전월 대비`); spec.push({align:'right', fmt:CMP_PCT_FMT}); }
+  });
+  const total = ['', '계'];
+  months.forEach((m, j) => {
+    const s1 = avgs.reduce((a, r) => a + (r[j] || 0), 0);
+    total.push(cmpRound(s1));
+    if(j > 0){ const s0 = avgs.reduce((a, r) => a + (r[j - 1] || 0), 0); total.push(s0 ? s1 / s0 - 1 : ''); }
+  });
+  const rows = stations.map((s, i) => {
+    const row = [i + 1, s];
+    months.forEach((m, j) => {
+      const v = avgs[i][j];
+      row.push(cmpRound(v));
+      if(j > 0){ const p = avgs[i][j - 1]; row.push(v != null && p ? v / p - 1 : ''); }
+    });
+    return row;
+  });
+  const widths = [6, 24, ...months.flatMap((m, j) => j > 0 ? [14, 14] : [14])];
+  const title = `역별 일평균 월별 추이 · ${months.map(label).join(' · ')}`;
+  return { aoa: [[title], [''], header, total, ...rows], spec, widths };
+}
+
+function exportCompareExcel(){
+  const d = CMP.last;
+  if(!d || !d.list.length){ alert('내보낼 점검 결과가 없습니다.'); return; }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, writeStyledSheet(compareAoa(d), COMPARE_SPEC, COMPARE_WIDTHS), `${d.U}월 점검`);
+  const monthly = monthlyAoa();
+  if(monthly) XLSX.utils.book_append_sheet(wb, writeStyledSheet(monthly.aoa, monthly.spec, monthly.widths), '월별 일평균');
+  XLSX.writeFile(wb, `역별점검_${d.U}월_${CMP.start}_${CMP.end}.xlsx`);
+}
+
+document.addEventListener('click', e => {
+  const t = e.target;
+  if(t.closest && t.closest('#cmpExportBtn')){ exportCompareExcel(); return; }
+  const mBtn = t.closest && t.closest('.cmp-month');
+  if(mBtn){
+    const m = mBtn.dataset.month;
+    const days = [...new Set(STATE.daily.map(x => x.d))].sort().filter(d => d.startsWith(m));
+    if(days.length){ CMP.start = days[0]; CMP.end = days[days.length - 1]; render(); }
+  }
+});
+
+function cmpOrderMap(){
+  const map = new Map();
+  const last = STATE.order[STATE.order.length - 1];
+  (STATE.months[last] || []).slice().sort((a, b) => (a.seq || 0) - (b.seq || 0))
+    .forEach((r, i) => { if(!map.has(r.name)) map.set(r.name, i); });
+  return map;
+}
+function cmpOrderOf(station, map){
+  for(const n of [station, ...(CMP_NAME_MAP[station] || [])]){ if(map.has(n)) return map.get(n); }
+  return Infinity;
+}
+function cmpInBill(station){
+  const names = [station, ...(CMP_NAME_MAP[station] || [])];
+  return STATE.order.some(m => (STATE.months[m] || []).some(r => names.includes(r.name)));
+}
+function cmpDailyAvgOf(station, ym){
+  if(!ym) return null;
+  const xs = STATE.daily.filter(x => x.s === station && x.d.startsWith(ym));
+  return xs.length ? xs.reduce((a, x) => a + x.u, 0) / xs.length : null;
+}
 
 function updateCmpTop(){
   const h = document.querySelector('header.app-head');
